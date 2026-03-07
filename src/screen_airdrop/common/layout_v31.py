@@ -1,0 +1,134 @@
+"""Layout contract and binary extension for V3.1 locator pipeline."""
+
+from __future__ import annotations
+
+import enum
+import struct
+from dataclasses import dataclass
+
+# Global contract constants.
+QUAD_ORDER = ("tl", "tr", "br", "bl")
+TIMING_MODE_ROWCOL = 1
+LAYOUT_V31_VERSION = 1
+
+# flags
+FLAG_TIMING_ENABLED = 1 << 0
+FLAG_RESERVED_ALIGNMENT = 1 << 1
+
+
+class LayoutInfoError(ValueError):
+    """Raised when LayoutInfoV31 payload is invalid."""
+
+
+class TimingMode(enum.IntEnum):
+    ROWCOL = TIMING_MODE_ROWCOL
+
+
+_LAYOUT_INFO_STRUCT_NOCRC = struct.Struct("<BBBBHHBB")
+_LAYOUT_INFO_STRUCT = struct.Struct("<BBBBHHBBH")
+
+
+DEFAULT_QUIET = 4
+DEFAULT_FINDER = 9
+DEFAULT_GUARD = 2
+DEFAULT_GRID_W = 160
+DEFAULT_GRID_H = 96
+
+
+@dataclass(frozen=True)
+class LayoutInfoV31:
+    layout_ver: int = LAYOUT_V31_VERSION
+    quiet: int = DEFAULT_QUIET
+    finder: int = DEFAULT_FINDER
+    guard: int = DEFAULT_GUARD
+    grid_w: int = DEFAULT_GRID_W
+    grid_h: int = DEFAULT_GRID_H
+    timing_mode: int = int(TimingMode.ROWCOL)
+    flags: int = FLAG_TIMING_ENABLED
+
+    @property
+    def frame_w(self) -> int:
+        return int(2 * self.quiet + 2 * self.finder + 2 * self.guard + self.grid_w)
+
+    @property
+    def frame_h(self) -> int:
+        return int(2 * self.quiet + 2 * self.finder + 2 * self.guard + self.grid_h)
+
+    def validate(self) -> None:
+        if self.layout_ver <= 0:
+            raise LayoutInfoError("invalid layout_ver")
+        if self.quiet < 1:
+            raise LayoutInfoError("quiet must be >=1")
+        if self.finder < 7 or self.finder % 2 == 0:
+            raise LayoutInfoError("finder must be odd and >=7")
+        if self.guard < 1:
+            raise LayoutInfoError("guard must be >=1")
+        if self.grid_w < 16 or self.grid_h < 16:
+            raise LayoutInfoError("grid too small")
+        if self.timing_mode != int(TimingMode.ROWCOL):
+            raise LayoutInfoError("unsupported timing_mode")
+        if self.flags & 0xFC:
+            raise LayoutInfoError("reserved flag bits must be zero")
+
+    def pack_without_crc(self) -> bytes:
+        self.validate()
+        return _LAYOUT_INFO_STRUCT_NOCRC.pack(
+            int(self.layout_ver),
+            int(self.quiet),
+            int(self.finder),
+            int(self.guard),
+            int(self.grid_w),
+            int(self.grid_h),
+            int(self.timing_mode),
+            int(self.flags),
+        )
+
+    def pack(self) -> bytes:
+        head = self.pack_without_crc()
+        crc = crc16_ccitt_false(head)
+        return _LAYOUT_INFO_STRUCT.pack(
+            int(self.layout_ver),
+            int(self.quiet),
+            int(self.finder),
+            int(self.guard),
+            int(self.grid_w),
+            int(self.grid_h),
+            int(self.timing_mode),
+            int(self.flags),
+            int(crc),
+        )
+
+    @classmethod
+    def unpack(cls, data: bytes) -> "LayoutInfoV31":
+        if len(data) < _LAYOUT_INFO_STRUCT.size:
+            raise LayoutInfoError("layout info too short")
+        fields = _LAYOUT_INFO_STRUCT.unpack(data[: _LAYOUT_INFO_STRUCT.size])
+        body = _LAYOUT_INFO_STRUCT_NOCRC.pack(*fields[:-1])
+        crc_exp = int(fields[-1])
+        crc_act = int(crc16_ccitt_false(body))
+        if crc_exp != crc_act:
+            raise LayoutInfoError("layout crc mismatch")
+        layout = cls(
+            layout_ver=int(fields[0]),
+            quiet=int(fields[1]),
+            finder=int(fields[2]),
+            guard=int(fields[3]),
+            grid_w=int(fields[4]),
+            grid_h=int(fields[5]),
+            timing_mode=int(fields[6]),
+            flags=int(fields[7]),
+        )
+        layout.validate()
+        return layout
+
+
+def crc16_ccitt_false(data: bytes, init: int = 0xFFFF) -> int:
+    crc = int(init) & 0xFFFF
+    for b in data:
+        crc ^= (int(b) & 0xFF) << 8
+        for _ in range(8):
+            if crc & 0x8000:
+                crc = ((crc << 1) ^ 0x1021) & 0xFFFF
+            else:
+                crc = (crc << 1) & 0xFFFF
+    return int(crc)

@@ -1,0 +1,36 @@
+{
+  "typeCheckingMode": "basic",
+  "reportMissingImports": false,
+  "include": ["src", "tests", "tools"],
+  "exclude": [
+    ".git",
+    ".venv",
+    ".ruff_cache",
+    ".pytest_cache",
+    ".mypy_cache",
+    "__pycache__",
+    "build",
+    "dist",
+    "node_modules",
+    "site-packages",
+    "venv"
+  ],
+  "executionEnvironments": [
+    {
+      "root": "src/screen_airdrop/common",
+      "pythonVersion": "3.7"
+    },
+    {
+      "root": "src/screen_airdrop/sender",
+      "pythonVersion": "3.7"
+    },
+    {
+      "root": "src/screen_airdrop/receiver",
+      "pythonVersion": "3.12"
+    },
+    {
+      "root": ".",
+      "pythonVersion": "3.12"
+    }
+  ]
+}

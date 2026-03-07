@@ -1,0 +1,85 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "screen-airdrop"
+version = "0.1.0"
+description = "File transfer via screen modulation over remote desktop"
+readme = "README.md"
+requires-python = ">=3.7"
+dependencies = [
+  "numpy>=1.21",
+]
+
+[project.optional-dependencies]
+sender-modern = [
+  "opencv-python>=4.8; python_version >= '3.8'",
+]
+sender-legacy = [
+  "opencv-python<4.7; python_version < '3.8'",
+]
+receiver = [
+  "mss>=9.0.1; python_version >= '3.8'",
+  "opencv-python>=4.8; python_version >= '3.8'",
+]
+full = [
+  "opencv-python<4.7; python_version < '3.8'",
+  "mss>=9.0.1; python_version >= '3.8'",
+  "opencv-python>=4.8; python_version >= '3.8'",
+]
+
+[project.scripts]
+screen-airdrop-sender = "screen_airdrop.sender.modern:main"
+screen-airdrop-sender-legacy = "screen_airdrop.sender.legacy:main"
+screen-airdrop-receiver = "screen_airdrop.receiver.cli:main"
+
+[dependency-groups]
+dev = [
+  "build>=1.2.2; python_version >= '3.8'",
+  "pyright; python_version >= '3.8'",
+  "pytest>=8.3.5; python_version >= '3.8'",
+  "ruff; python_version >= '3.8'",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/screen_airdrop"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests", "tools"]
+force-exclude = true
+exclude = [
+  ".git",
+  ".hg",
+  ".mypy_cache",
+  ".nox",
+  ".pytest_cache",
+  ".ruff_cache",
+  ".tox",
+  ".venv",
+  ".vscode",
+  "__pypackages__",
+  "__pycache__",
+  "build",
+  "dist",
+  "node_modules",
+  "site-packages",
+  "venv",
+  ".DS_Store",
+  "debug"
+]
+
+[tool.ruff.per-file-target-version]
+"src/screen_airdrop/common/**/*.py" = "py37"
+"src/screen_airdrop/sender/**/*.py" = "py37"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"

@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: uv sync --group dev
+      - name: Ruff
+        run: uv run ruff check .
+      - name: Pyright
+        run: uv run pyright
+      - name: Unit tests
+        run: uv run pytest tests/unit -q
+      - name: Integration tests
+        run: uv run pytest tests/integration -q
+      - name: Real data e2e
+        run: uv run pytest tests/e2e -m real_data -q
+      - name: Replay benchmark quick
+        run: uv run python bench/run_benchmark.py --mode replay --quick --protocol v3_1
+      - name: Summarize benchmark
+        run: uv run python bench/summarize.py
+      - name: Upload benchmark summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-summary
+          path: bench/results/summary.md

@@ -1,0 +1,11 @@
+{
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "sk-WfhGsQ8QTUGqlCQaCuQ4H1lD1Hac4MFAGx34JEj2VLVY856e",
+    "ANTHROPIC_BASE_URL": "https://yxai.anthropic.edu.pl",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+  },
+  "permissions": {
+    "allow": [],
+    "deny": []
+  }
+}

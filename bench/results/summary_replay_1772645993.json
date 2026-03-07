@@ -1,0 +1,7 @@
+{
+  "total_cases": 4,
+  "ok_cases": 4,
+  "avg_goodput_kbps": 0.26489507869531004,
+  "p95_end_to_end_kbps": 0.526506518445423,
+  "avg_bad_frame_rate": 0.0
+}

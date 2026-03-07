@@ -1,0 +1,45 @@
+{
+  "description": "V3.1 regression set captured from real screen dumps; all listed frames must decode.",
+  "default": {
+    "grid_w": 160,
+    "grid_h": 96,
+    "locator_engine": "new"
+  },
+  "cases": [
+    {
+      "id": "recv_live_fix_f00001",
+      "frame_path": "debug/recv_live_fix/frame_00001.raw.png",
+      "source_debug_json": "debug/recv_live_fix/frame_00001.json"
+    },
+    {
+      "id": "recv_live_fix_f00002",
+      "frame_path": "debug/recv_live_fix/frame_00002.raw.png",
+      "source_debug_json": "debug/recv_live_fix/frame_00002.json"
+    },
+    {
+      "id": "recv_live_fix_f00003",
+      "frame_path": "debug/recv_live_fix/frame_00003.raw.png",
+      "source_debug_json": "debug/recv_live_fix/frame_00003.json"
+    },
+    {
+      "id": "recv_live_fix_f00004",
+      "frame_path": "debug/recv_live_fix/frame_00004.raw.png",
+      "source_debug_json": "debug/recv_live_fix/frame_00004.json"
+    },
+    {
+      "id": "recv_live_fix_f00005",
+      "frame_path": "debug/recv_live_fix/frame_00005.raw.png",
+      "source_debug_json": "debug/recv_live_fix/frame_00005.json"
+    },
+    {
+      "id": "recv_live_fix_f00006",
+      "frame_path": "debug/recv_live_fix/frame_00006.raw.png",
+      "source_debug_json": "debug/recv_live_fix/frame_00006.json"
+    },
+    {
+      "id": "recv_live_fix_f00007",
+      "frame_path": "debug/recv_live_fix/frame_00007.raw.png",
+      "source_debug_json": "debug/recv_live_fix/frame_00007.json"
+    }
+  ]
+}
