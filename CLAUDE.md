@@ -44,9 +44,8 @@ uv run python bench/summarize.py
 ### Package layout (`src/screen_airdrop/`)
 
 - **`common/`** — shared code that must stay Python 3.7 compatible:
-  - `protocol.py` — V1/V2 binary frame header struct, CRC, magic bytes (`SARD`)
-  - `protocol_v3.py` — V3 frame header, ECC level definitions (`SAR3`)
-  - `layout_v31.py` — V3.1 `LayoutInfoV31` dataclass (four-corner fixed-grid contract)
+  - `protocol_basic.py` — basic protocol frame header, ECC level definitions (`SAR3`)
+  - `layout_basic.py` — `LayoutInfoBasic` dataclass (four-corner fixed-grid contract)
   - `manifest.py` — session manifest (JSON: file list, SHA-256, chunk params)
   - `packing.py` — tar/gzip pack and unpack helpers
   - `errors.py` — typed error codes (E1001–E3002)
@@ -54,30 +53,24 @@ uv run python bench/summarize.py
 - **`sender/`** — encodes and plays frames on screen:
   - `modern.py` / `legacy.py` — CLI entrypoints; legacy targets Python 3.7.6 with stdlib only
   - `controller.py` — orchestrates pack → encode → render loop
-  - `encoder.py` / `encoder_v3.py` / `encoder_v31.py` — protocol-specific frame renderers
+  - `encoder_basic.py` — basic protocol frame renderer
   - `renderer_cv2.py` — OpenCV window display loop
 
 - **`receiver/`** — captures screen and reconstructs files:
-  - `cli.py` — unified receiver CLI (handles v1/v2/v3/v3_1)
+  - `cli.py` — unified receiver CLI
   - `capture_mss.py` — MSS screen capture
-  - `locator.py` / `locator_v31.py` — window/frame locator (v2: contour detection; v3.1: four-corner finder patterns)
-  - `detector_v3.py` / `detector_v31.py` — symbol bounding box detection
-  - `decoder.py` / `decoder_v3.py` / `decoder_v31.py` — grid sampling → bits → frame header + payload
+  - `locator_basic.py` — four-corner finder patterns locator
+  - `detector_basic.py` / `detector_v31_basic.py` — symbol bounding box detection
+  - `decoder_basic.py` — grid sampling → bits → frame header + payload
   - `assembler.py` — chunk deduplication and completion tracking
   - `restore.py` — reassemble payload, decompress, SHA-256 verify
   - `stats.py` — real-time throughput/FPS/ETA metrics
   - `roi_selector.py` / `roi_profile.py` — interactive region selection and persistence
   - `frame_replay_source.py` — replay pre-captured frames for offline testing
 
-### Protocol versions
+### Protocol
 
-| Protocol | Magic | Key feature |
-|----------|-------|-------------|
-| v1/v2 | `SARD` | Contour-based locator, block grid payload |
-| v3 | `SAR3` | QR-style finder patterns + timing strips, ECC repetition |
-| v3_1 | `SAR3` | Four-corner fixed-grid, module-center sampling, `LayoutInfoV31` embedded in sync frame |
-
-The default protocol is **v3_1**. The receiver `--locator-engine auto` tries the new locator first, falls back to legacy. `v3_1` does not fall back to `v3` decoding.
+The current protocol is **basic** (magic bytes: `SAR3`). It uses four-corner fixed-grid, module-center sampling, and `LayoutInfoBasic` embedded in sync frames. A future **fountain** (喷泉码) protocol is planned.
 
 ### Python version constraints
 

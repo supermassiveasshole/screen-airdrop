@@ -6,30 +6,19 @@ import json
 import os
 import random
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Generator, Optional
 
 from screen_airdrop.common.manifest import Manifest
 from screen_airdrop.common.packing import build_payload_and_manifest
-from screen_airdrop.common.protocol import (
+from screen_airdrop.common.protocol_basic import (
+    ECC_LEVELS,
+    ECC_Q,
     FRAME_DATA,
     FRAME_END,
     FRAME_SYNC,
-    PROTOCOL_VERSION_V1,
-    PROTOCOL_VERSION_V2,
-    FrameHeader,
+    FrameHeaderBasic,
 )
-from screen_airdrop.common.protocol_v3 import (
-    V3_ECC_LEVELS,
-    V3_ECC_Q,
-    V3_FRAME_DATA,
-    V3_FRAME_END,
-    V3_FRAME_SYNC,
-    FrameHeaderV3,
-)
-from screen_airdrop.sender.encoder import encode_frame, frame_capacity_bytes
-from screen_airdrop.sender.encoder_v3 import encode_frame_v3
-from screen_airdrop.sender.encoder_v3 import frame_capacity_bytes as frame_capacity_bytes_v3
-from screen_airdrop.sender.encoder_v31 import encode_frame_v31, frame_capacity_bytes_v31
+from screen_airdrop.sender.encoder_basic import encode_frame_basic, frame_capacity_bytes_basic
 from screen_airdrop.sender.renderer_cv2 import CV2Renderer
 
 DEFAULT_WIDTH = 1920
@@ -105,55 +94,45 @@ def build_encoded_frames(
     width: int = DEFAULT_WIDTH,
     height: int = DEFAULT_HEIGHT,
     session_id: Optional[int] = None,
-    protocol: str = "v3_1",
+    protocol: str = "basic",
     quiet_zone_px: int = 48,
-    ecc_level: str = V3_ECC_Q,
+    ecc_level: str = ECC_Q,
     module_grid: str = "160x96",
     guard_band_modules: int = 2,
     corner_size_modules: int = 9,
     outer_padding_px: int = 0,
     outer_padding_color: str = "black",
-) -> Dict[str, Any]:
+) -> Generator[Dict[str, Any], None, None]:
     if session_id is None:
         session_id = random.getrandbits(64)
     outer_padding_white = outer_padding_color.lower() == "white"
 
     gw = 160
     gh = 96
-    if protocol in ("v3", "v3_1"):
-        if ecc_level not in V3_ECC_LEVELS:
+    if protocol == "basic":
+        if ecc_level not in ECC_LEVELS:
             raise RuntimeError("invalid ecc-level: {0}".format(ecc_level))
         try:
             gw, gh = [int(p) for p in module_grid.lower().split("x")]
         except Exception as exc:
             raise RuntimeError("invalid module-grid {0}: {1}".format(module_grid, exc))
-        version = 31 if protocol == "v3_1" else 3
-        if protocol == "v3_1":
-            cap = frame_capacity_bytes_v31(
-                gw,
-                gh,
-                ecc_level=ecc_level,
-                guard_band=guard_band_modules,
-                corner_size=corner_size_modules,
-            )
-        else:
-            cap = frame_capacity_bytes_v3(gw, gh, ecc_level=ecc_level)
-    else:
-        version = PROTOCOL_VERSION_V2 if protocol == "v2" else PROTOCOL_VERSION_V1
-        cap = frame_capacity_bytes(
-            width,
-            height,
-            block_size,
-            protocol_version=version,
-            quiet_zone_px=quiet_zone_px,
+        version = 1  # basic protocol
+        cap = frame_capacity_bytes_basic(
+            gw,
+            gh,
+            ecc_level=ecc_level,
+            guard_band=guard_band_modules,
+            corner_size=corner_size_modules,
         )
+    else:
+        raise ValueError(f"Protocol '{protocol}' no longer supported, use 'basic'")
     effective_chunk_size = int(chunk_size)
-    if protocol in ("v3", "v3_1"):
+    if protocol == "basic":
         robust_cap = min(int(cap), max(64, int(cap * 0.9)))
         if effective_chunk_size > robust_cap:
             effective_chunk_size = robust_cap
             print(
-                "v3 robust chunk-size cap applied: requested={0} frame_capacity={1} robust_cap={2}".format(
+                "basic robust chunk-size cap applied: requested={0} frame_capacity={1} robust_cap={2}".format(
                     chunk_size,
                     cap,
                     effective_chunk_size,
@@ -166,7 +145,12 @@ def build_encoded_frames(
             )
         )
 
-    built = _build_chunks(input_path=input_path, compress=compress, chunk_size=effective_chunk_size, session_id=session_id)
+    built = _build_chunks(
+        input_path=input_path,
+        compress=compress,
+        chunk_size=effective_chunk_size,
+        session_id=session_id,
+    )
     chunks = list(built["chunks"])
     payload_chunks = list(built["payload_chunks"])
     manifest_repeat = max(1, int(manifest_repeat))
@@ -190,9 +174,9 @@ def build_encoded_frames(
     }
 
     for i in range(max(0, sync_frames)):
-        if protocol in ("v3", "v3_1"):
-            header = FrameHeaderV3.make(
-                frame_type=V3_FRAME_SYNC,
+        if protocol == "basic":
+            header = FrameHeaderBasic.make(
+                frame_type=FRAME_SYNC,
                 session_id=session_id,
                 epoch_id=0,
                 frame_id=i,
@@ -201,7 +185,7 @@ def build_encoded_frames(
                 payload=b"",
             )
         else:
-            header = FrameHeader.make(
+            header = FrameHeaderBasic.make(
                 frame_type=FRAME_SYNC,
                 session_id=session_id,
                 epoch_id=0,
@@ -217,51 +201,28 @@ def build_encoded_frames(
             "frame_id": i,
             "chunk_id": 0,
             "metadata": metadata,
-            "image": (
-                    encode_frame_v31(
-                        header,
-                        b"",
-                        width=width,
-                        height=height,
-                        grid_w=gw,
-                        grid_h=gh,
-                        ecc_level=ecc_level,
-                        guard_band=guard_band_modules,
-                        corner_size=corner_size_modules,
-                        outer_padding_px=outer_padding_px,
-                        outer_padding_white=outer_padding_white,
-                    )
-                    if protocol == "v3_1"
-                    else encode_frame_v3(
-                        header,
-                        b"",
-                        width=width,
-                        height=height,
-                        grid_w=gw,
-                        grid_h=gh,
-                        ecc_level=ecc_level,
-                        outer_padding_px=outer_padding_px,
-                        outer_padding_white=outer_padding_white,
-                    )
-                    if protocol == "v3"
-                    else encode_frame(
-                        header,
-                        b"",
-                        width=width,
-                        height=height,
-                        block_size=block_size,
-                        quiet_zone_px=quiet_zone_px,
-                    )
-                ),
-            }
+            "image": encode_frame_basic(
+                header,
+                b"",
+                width=width,
+                height=height,
+                grid_w=gw,
+                grid_h=gh,
+                ecc_level=ecc_level,
+                guard_band=guard_band_modules,
+                corner_size=corner_size_modules,
+                outer_padding_px=outer_padding_px,
+                outer_padding_white=outer_padding_white,
+            ),
+        }
 
     def _yield_epoch(epoch: int):
         frame_id = 0
         manifest_chunk = chunks[0]
         for _ in range(manifest_repeat):
-            if protocol in ("v3", "v3_1"):
-                header = FrameHeaderV3.make(
-                    frame_type=V3_FRAME_DATA,
+            if protocol == "basic":
+                header = FrameHeaderBasic.make(
+                    frame_type=FRAME_DATA,
                     session_id=session_id,
                     epoch_id=epoch,
                     frame_id=frame_id,
@@ -270,7 +231,7 @@ def build_encoded_frames(
                     payload=manifest_chunk,
                 )
             else:
-                header = FrameHeader.make(
+                header = FrameHeaderBasic.make(
                     frame_type=FRAME_DATA,
                     session_id=session_id,
                     epoch_id=epoch,
@@ -286,49 +247,26 @@ def build_encoded_frames(
                 "frame_id": frame_id,
                 "chunk_id": 0,
                 "metadata": metadata,
-                "image": (
-                        encode_frame_v31(
-                            header,
-                            manifest_chunk,
-                            width=width,
-                            height=height,
-                            grid_w=gw,
-                            grid_h=gh,
-                            ecc_level=ecc_level,
-                            guard_band=guard_band_modules,
-                            corner_size=corner_size_modules,
-                            outer_padding_px=outer_padding_px,
-                            outer_padding_white=outer_padding_white,
-                        )
-                        if protocol == "v3_1"
-                        else encode_frame_v3(
-                            header,
-                            chunk,
-                            width=width,
-                            height=height,
-                            grid_w=gw,
-                            grid_h=gh,
-                            ecc_level=ecc_level,
-                            outer_padding_px=outer_padding_px,
-                            outer_padding_white=outer_padding_white,
-                        )
-                        if protocol == "v3"
-                        else encode_frame(
-                            header,
-                            manifest_chunk,
-                            width=width,
-                            height=height,
-                            block_size=block_size,
-                            quiet_zone_px=quiet_zone_px,
-                        )
+                "image": encode_frame_basic(
+                    header,
+                    manifest_chunk,
+                    width=width,
+                    height=height,
+                    grid_w=gw,
+                    grid_h=gh,
+                    ecc_level=ecc_level,
+                    guard_band=guard_band_modules,
+                    corner_size=corner_size_modules,
+                    outer_padding_px=outer_padding_px,
+                    outer_padding_white=outer_padding_white,
                 ),
             }
             frame_id += 1
 
         for chunk_id, chunk in enumerate(payload_chunks, start=1):
-            if protocol in ("v3", "v3_1"):
-                header = FrameHeaderV3.make(
-                    frame_type=V3_FRAME_DATA,
+            if protocol == "basic":
+                header = FrameHeaderBasic.make(
+                    frame_type=FRAME_DATA,
                     session_id=session_id,
                     epoch_id=epoch,
                     frame_id=frame_id,
@@ -337,7 +275,7 @@ def build_encoded_frames(
                     payload=chunk,
                 )
             else:
-                header = FrameHeader.make(
+                header = FrameHeaderBasic.make(
                     frame_type=FRAME_DATA,
                     session_id=session_id,
                     epoch_id=epoch,
@@ -354,47 +292,47 @@ def build_encoded_frames(
                 "chunk_id": chunk_id,
                 "metadata": metadata,
                 "image": (
-                        encode_frame_v31(
-                            header,
-                            chunk,
-                            width=width,
-                            height=height,
-                            grid_w=gw,
-                            grid_h=gh,
-                            ecc_level=ecc_level,
-                            guard_band=guard_band_modules,
-                            corner_size=corner_size_modules,
-                            outer_padding_px=outer_padding_px,
-                            outer_padding_white=outer_padding_white,
-                        )
-                        if protocol == "v3_1"
-                        else encode_frame_v3(
-                            header,
-                            chunk,
-                            width=width,
-                            height=height,
-                            grid_w=gw,
-                            grid_h=gh,
-                            ecc_level=ecc_level,
-                            outer_padding_px=outer_padding_px,
-                            outer_padding_white=outer_padding_white,
-                        )
-                        if protocol == "v3"
-                        else encode_frame(
-                            header,
-                            chunk,
-                            width=width,
-                            height=height,
-                            block_size=block_size,
-                            quiet_zone_px=quiet_zone_px,
-                        )
+                    encode_frame_basic(
+                        header,
+                        chunk,
+                        width=width,
+                        height=height,
+                        grid_w=gw,
+                        grid_h=gh,
+                        ecc_level=ecc_level,
+                        guard_band=guard_band_modules,
+                        corner_size=corner_size_modules,
+                        outer_padding_px=outer_padding_px,
+                        outer_padding_white=outer_padding_white,
+                    )
+                    if protocol == "basic"
+                    else encode_frame_basic(
+                        header,
+                        chunk,
+                        width=width,
+                        height=height,
+                        grid_w=gw,
+                        grid_h=gh,
+                        ecc_level=ecc_level,
+                        outer_padding_px=outer_padding_px,
+                        outer_padding_white=outer_padding_white,
+                    )
+                    if False
+                    else encode_frame_basic(
+                        header,
+                        chunk,
+                        width=width,
+                        height=height,
+                        block_size=block_size,
+                        quiet_zone_px=quiet_zone_px,
+                    )
                 ),
             }
             frame_id += 1
 
-        if protocol in ("v3", "v3_1"):
-            end_header = FrameHeaderV3.make(
-                frame_type=V3_FRAME_END,
+        if protocol == "basic":
+            end_header = FrameHeaderBasic.make(
+                frame_type=FRAME_END,
                 session_id=session_id,
                 epoch_id=epoch,
                 frame_id=frame_id,
@@ -403,7 +341,7 @@ def build_encoded_frames(
                 payload=b"",
             )
         else:
-            end_header = FrameHeader.make(
+            end_header = FrameHeaderBasic.make(
                 frame_type=FRAME_END,
                 session_id=session_id,
                 epoch_id=epoch,
@@ -420,42 +358,42 @@ def build_encoded_frames(
             "chunk_id": 0,
             "metadata": metadata,
             "image": (
-                    encode_frame_v31(
-                        end_header,
-                        b"",
-                        width=width,
-                        height=height,
-                        grid_w=gw,
-                        grid_h=gh,
-                        ecc_level=ecc_level,
-                        guard_band=guard_band_modules,
-                        corner_size=corner_size_modules,
-                        outer_padding_px=outer_padding_px,
-                        outer_padding_white=outer_padding_white,
-                    )
-                    if protocol == "v3_1"
-                    else encode_frame_v3(
-                        end_header,
-                        b"",
-                        width=width,
-                        height=height,
-                        grid_w=gw,
-                        grid_h=gh,
-                        ecc_level=ecc_level,
-                        outer_padding_px=outer_padding_px,
-                        outer_padding_white=outer_padding_white,
-                    )
-                    if protocol == "v3"
-                    else encode_frame(
-                        end_header,
-                        b"",
-                        width=width,
-                        height=height,
-                        block_size=block_size,
-                        quiet_zone_px=quiet_zone_px,
-                    )
-                ),
-            }
+                encode_frame_basic(
+                    end_header,
+                    b"",
+                    width=width,
+                    height=height,
+                    grid_w=gw,
+                    grid_h=gh,
+                    ecc_level=ecc_level,
+                    guard_band=guard_band_modules,
+                    corner_size=corner_size_modules,
+                    outer_padding_px=outer_padding_px,
+                    outer_padding_white=outer_padding_white,
+                )
+                if protocol == "basic"
+                else encode_frame_basic(
+                    end_header,
+                    b"",
+                    width=width,
+                    height=height,
+                    grid_w=gw,
+                    grid_h=gh,
+                    ecc_level=ecc_level,
+                    outer_padding_px=outer_padding_px,
+                    outer_padding_white=outer_padding_white,
+                )
+                if False
+                else encode_frame_basic(
+                    end_header,
+                    b"",
+                    width=width,
+                    height=height,
+                    block_size=block_size,
+                    quiet_zone_px=quiet_zone_px,
+                )
+            ),
+        }
 
     epochs = int(epochs)
     if epochs <= 0:
@@ -481,9 +419,9 @@ def run_sender(
     dump_frames: Optional[str] = None,
     report_json: Optional[str] = None,
     overlay: bool = False,
-    protocol: str = "v3_1",
+    protocol: str = "basic",
     quiet_zone_px: int = 48,
-    ecc_level: str = V3_ECC_Q,
+    ecc_level: str = ECC_Q,
     module_grid: str = "160x96",
     guard_band_modules: int = 2,
     corner_size_modules: int = 9,
@@ -627,7 +565,9 @@ def run_sender(
             if dump_frames:
                 dump_name = _frame_name(current_item)
                 if dump_name != last_dump_name:
-                    renderer.cv2.imwrite(os.path.join(dump_frames, dump_name), current_item["image"])
+                    renderer.cv2.imwrite(
+                        os.path.join(dump_frames, dump_name), current_item["image"]
+                    )
                     last_dump_name = dump_name
             command = renderer.show(
                 current_item["image"],

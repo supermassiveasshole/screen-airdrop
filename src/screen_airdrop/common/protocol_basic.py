@@ -9,45 +9,48 @@ from typing import Iterable, List
 
 from .errors import E2003, E2004, ScreenAirdropError
 
-V3_MAGIC = 0x53415233  # "SAR3"
-V3_VERSION = 3
+# Protocol version for manifest
+PROTOCOL_VERSION = 3.1
 
-V3_FRAME_SYNC = 0
-V3_FRAME_DATA = 1
-V3_FRAME_END = 2
+MAGIC = 0x53415233  # "SAR3"
+VERSION = 3
 
-V3_FORMAT_MAGIC = 0xA35D
-V3_DEFAULT_GRID_W = 160
-V3_DEFAULT_GRID_H = 96
-V3_QUIET_MODULES = 4
-V3_FINDER_SIZE = 9
-V3_ALIGNMENT_SIZE = 5
-V3_TIMING_OFFSET = V3_QUIET_MODULES + V3_FINDER_SIZE + 1
+FRAME_SYNC = 0
+FRAME_DATA = 1
+FRAME_END = 2
 
-V3_ECC_L = "L"
-V3_ECC_M = "M"
-V3_ECC_Q = "Q"
-V3_ECC_H = "H"
-V3_ECC_LEVELS = (V3_ECC_L, V3_ECC_M, V3_ECC_Q, V3_ECC_H)
-V3_ECC_TO_REP = {
-    V3_ECC_L: 1,
-    V3_ECC_M: 2,
-    V3_ECC_Q: 3,
-    V3_ECC_H: 4,
+FORMAT_MAGIC = 0xA35D
+DEFAULT_GRID_W = 160
+DEFAULT_GRID_H = 96
+QUIET_MODULES = 4
+FINDER_SIZE = 9
+ALIGNMENT_SIZE = 5
+TIMING_OFFSET = QUIET_MODULES + FINDER_SIZE + 1
+
+ECC_L = "L"
+ECC_M = "M"
+ECC_Q = "Q"
+ECC_H = "H"
+ECC_LEVELS = (ECC_L, ECC_M, ECC_Q, ECC_H)
+ECC_TO_REP = {
+    ECC_L: 1,
+    ECC_M: 2,
+    ECC_Q: 3,
+    ECC_H: 4,
 }
-V3_ECC_TO_ID = {
-    V3_ECC_L: 0,
-    V3_ECC_M: 1,
-    V3_ECC_Q: 2,
-    V3_ECC_H: 3,
+ECC_TO_ID = {
+    ECC_L: 0,
+    ECC_M: 1,
+    ECC_Q: 2,
+    ECC_H: 3,
 }
-V3_ID_TO_ECC = {v: k for k, v in V3_ECC_TO_ID.items()}
+ID_TO_ECC = {v: k for k, v in ECC_TO_ID.items()}
 
-V3_HEADER_STRUCT = struct.Struct("<IBBHQIIIIHII")
-V3_HEADER_SIZE = V3_HEADER_STRUCT.size
+HEADER_STRUCT = struct.Struct("<IBBHQIIIIHII")
+HEADER_SIZE = HEADER_STRUCT.size
 
-V3_FORMAT_STRUCT = struct.Struct("<HBBBBH")
-V3_FORMAT_SIZE = V3_FORMAT_STRUCT.size
+FORMAT_STRUCT = struct.Struct("<HBBBBH")
+FORMAT_SIZE = FORMAT_STRUCT.size
 
 
 def crc32(data: bytes) -> int:
@@ -105,7 +108,7 @@ def validate_payload_crc(payload_crc32: int, payload: bytes) -> None:
 
 
 @dataclass
-class FormatInfoV3:
+class FormatInfoBasic:
     magic: int
     version: int
     frame_type: int
@@ -114,7 +117,7 @@ class FormatInfoV3:
     reserved: int = 0
 
     def pack(self) -> bytes:
-        raw = V3_FORMAT_STRUCT.pack(
+        raw = FORMAT_STRUCT.pack(
             self.magic,
             self.version,
             self.frame_type,
@@ -126,16 +129,16 @@ class FormatInfoV3:
         return raw + struct.pack("<H", parity)
 
     @classmethod
-    def unpack(cls, data: bytes) -> "FormatInfoV3":
-        if len(data) < V3_FORMAT_SIZE + 2:
+    def unpack(cls, data: bytes) -> "FormatInfoBasic":
+        if len(data) < FORMAT_SIZE + 2:
             raise ScreenAirdropError(E2003, "format info too short")
-        raw = data[:V3_FORMAT_SIZE]
-        parity_expected = struct.unpack("<H", data[V3_FORMAT_SIZE : V3_FORMAT_SIZE + 2])[0]
+        raw = data[:FORMAT_SIZE]
+        parity_expected = struct.unpack("<H", data[FORMAT_SIZE : FORMAT_SIZE + 2])[0]
         parity_actual = crc32(raw) & 0xFFFF
         if parity_actual != parity_expected:
             raise ScreenAirdropError(E2003, "format parity mismatch")
-        magic, version, frame_type, mask_id, ecc_id, reserved = V3_FORMAT_STRUCT.unpack(raw)
-        if magic != V3_FORMAT_MAGIC:
+        magic, version, frame_type, mask_id, ecc_id, reserved = FORMAT_STRUCT.unpack(raw)
+        if magic != FORMAT_MAGIC:
             raise ScreenAirdropError(E2003, "bad format magic")
         return cls(
             magic=magic,
@@ -148,7 +151,7 @@ class FormatInfoV3:
 
 
 @dataclass
-class FrameHeaderV3:
+class FrameHeaderBasic:
     magic: int
     version: int
     frame_type: int
@@ -173,11 +176,11 @@ class FrameHeaderV3:
         chunk_id: int,
         payload: bytes,
         flags: int = 0,
-    ) -> "FrameHeaderV3":
+    ) -> "FrameHeaderBasic":
         payload_crc = crc32(payload)
         header = cls(
-            magic=V3_MAGIC,
-            version=V3_VERSION,
+            magic=MAGIC,
+            version=VERSION,
             frame_type=frame_type,
             flags=flags,
             session_id=session_id,
@@ -193,7 +196,7 @@ class FrameHeaderV3:
         return header
 
     def _pack_with_crc(self, header_crc32: int) -> bytes:
-        return V3_HEADER_STRUCT.pack(
+        return HEADER_STRUCT.pack(
             self.magic,
             self.version,
             self.frame_type,
@@ -215,10 +218,10 @@ class FrameHeaderV3:
         return self._pack_with_crc(self.header_crc32)
 
     @classmethod
-    def unpack(cls, data: bytes) -> "FrameHeaderV3":
-        if len(data) < V3_HEADER_SIZE:
+    def unpack(cls, data: bytes) -> "FrameHeaderBasic":
+        if len(data) < HEADER_SIZE:
             raise ScreenAirdropError(E2003, "v3 header too short")
-        parts = V3_HEADER_STRUCT.unpack(data[:V3_HEADER_SIZE])
+        parts = HEADER_STRUCT.unpack(data[:HEADER_SIZE])
         header = cls(
             magic=parts[0],
             version=parts[1],
@@ -233,29 +236,33 @@ class FrameHeaderV3:
             header_crc32=parts[10],
             payload_crc32=parts[11],
         )
-        if header.magic != V3_MAGIC:
+        if header.magic != MAGIC:
             raise ScreenAirdropError(E2003, "bad v3 magic")
-        if header.version != V3_VERSION:
+        if header.version != VERSION:
             raise ScreenAirdropError(E2003, "bad v3 version")
         if header.compute_header_crc() != header.header_crc32:
             raise ScreenAirdropError(E2003, "v3 header crc mismatch")
         return header
 
 
-def encode_header_and_payload_bits(header: FrameHeaderV3, payload: bytes, ecc_level: str) -> List[int]:
-    rep = V3_ECC_TO_REP[ecc_level]
+def encode_header_and_payload_bits(
+    header: FrameHeaderBasic, payload: bytes, ecc_level: str
+) -> List[int]:
+    rep = ECC_TO_REP[ecc_level]
     bits = _bits_from_bytes(header.pack() + payload)
     return ecc_repetition(bits, rep)
 
 
-def decode_header_and_payload_bits(bits: List[int], ecc_level: str) -> tuple[FrameHeaderV3, bytes]:
-    rep = V3_ECC_TO_REP[ecc_level]
+def decode_header_and_payload_bits(
+    bits: List[int], ecc_level: str
+) -> tuple[FrameHeaderBasic, bytes]:
+    rep = ECC_TO_REP[ecc_level]
     dec = decode_repetition(bits, rep)
     raw = _bytes_from_bits(dec)
-    if len(raw) < V3_HEADER_SIZE:
+    if len(raw) < HEADER_SIZE:
         raise ScreenAirdropError(E2003, "v3 data too short")
-    header = FrameHeaderV3.unpack(raw[:V3_HEADER_SIZE])
-    payload = raw[V3_HEADER_SIZE : V3_HEADER_SIZE + header.payload_len]
+    header = FrameHeaderBasic.unpack(raw[:HEADER_SIZE])
+    payload = raw[HEADER_SIZE : HEADER_SIZE + header.payload_len]
     if len(payload) != header.payload_len:
         raise ScreenAirdropError(E2003, "v3 payload length mismatch")
     validate_payload_crc(header.payload_crc32, payload)

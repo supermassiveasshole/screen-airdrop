@@ -1,12 +1,12 @@
-from screen_airdrop.common.protocol_v3 import V3_FRAME_DATA, FrameHeaderV3
-from screen_airdrop.receiver.decoder_v31 import decode_frame_v31
-from screen_airdrop.sender.encoder_v31 import build_symbol_modules_v31, encode_frame_v31
+from screen_airdrop.common.protocol_basic import FRAME_DATA, FrameHeaderBasic
+from screen_airdrop.receiver.decoder_basic import decode_frame_basic
+from screen_airdrop.sender.encoder_basic import build_symbol_modules_basic, encode_frame_basic
 
 
 def test_decode_v31_from_rendered_frame():
     payload = b"decoder-v31-frame-roundtrip"
-    header = FrameHeaderV3.make(
-        frame_type=V3_FRAME_DATA,
+    header = FrameHeaderBasic.make(
+        frame_type=FRAME_DATA,
         session_id=123,
         epoch_id=1,
         frame_id=2,
@@ -14,7 +14,7 @@ def test_decode_v31_from_rendered_frame():
         chunk_id=2,
         payload=payload,
     )
-    frame = encode_frame_v31(
+    frame = encode_frame_basic(
         header=header,
         payload=payload,
         width=1920,
@@ -25,7 +25,7 @@ def test_decode_v31_from_rendered_frame():
         guard_band=2,
         corner_size=9,
     )
-    parsed, restored, meta = decode_frame_v31(
+    parsed, restored, meta = decode_frame_basic(
         frame=frame,
         detect_mode="full",
         grid_w=160,
@@ -40,8 +40,8 @@ def test_decode_v31_from_rendered_frame():
 
 def test_build_v31_modules_size():
     payload = b"abc"
-    header = FrameHeaderV3.make(
-        frame_type=V3_FRAME_DATA,
+    header = FrameHeaderBasic.make(
+        frame_type=FRAME_DATA,
         session_id=1,
         epoch_id=0,
         frame_id=0,
@@ -49,7 +49,7 @@ def test_build_v31_modules_size():
         chunk_id=0,
         payload=payload,
     )
-    modules = build_symbol_modules_v31(
+    modules = build_symbol_modules_basic(
         header=header,
         payload=payload,
         grid_w=160,

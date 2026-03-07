@@ -13,15 +13,16 @@ def test_replay_lossy_still_recovers(tmp_path: Path):
     src.mkdir()
     (src / "payload.txt").write_text("x" * 20000)
 
-    encoded = build_encoded_frames(
+    encoded_gen = build_encoded_frames(
         input_path=str(src),
         block_size=6,
         chunk_size=1024,
         sync_frames=5,
         epochs=4,
     )
+    encoded = list(encoded_gen)
 
-    frames = [item for item in encoded["frames"] if item["kind"] == "data"]
+    frames = [item for item in encoded if item["kind"] == "data"]
     random.seed(7)
     kept = []
     for f in frames:

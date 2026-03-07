@@ -39,7 +39,11 @@ class CV2Renderer(object):
                 cv2.WND_PROP_ASPECT_RATIO,
                 cv2.WINDOW_FREERATIO,
             )
-        if self.fullscreen and hasattr(cv2, "WND_PROP_FULLSCREEN") and hasattr(cv2, "WINDOW_FULLSCREEN"):
+        if (
+            self.fullscreen
+            and hasattr(cv2, "WND_PROP_FULLSCREEN")
+            and hasattr(cv2, "WINDOW_FULLSCREEN")
+        ):
             cv2.setWindowProperty(
                 self.window_name,
                 cv2.WND_PROP_FULLSCREEN,
@@ -100,7 +104,11 @@ class CV2Renderer(object):
         time.sleep(0.05)
 
     def set_window_title(self, suffix: Optional[str] = None) -> None:
-        title = self._base_window_name if not suffix else "{0} | {1}".format(self._base_window_name, suffix)
+        title = (
+            self._base_window_name
+            if not suffix
+            else "{0} | {1}".format(self._base_window_name, suffix)
+        )
         current_title = getattr(self, "_current_title", self._base_window_name)
         if title == current_title:
             return

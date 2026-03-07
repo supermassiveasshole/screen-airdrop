@@ -48,15 +48,19 @@ def select_region(
     canvas.pack(fill="both", expand=True)
 
     canvas.create_text(
-        width // 2, 40,
+        width // 2,
+        40,
         text="拖动鼠标选择区域",
-        fill="#00FF00", font=("Arial", 24, "bold"),
+        fill="#00FF00",
+        font=("Arial", 24, "bold"),
         tags="instruction",
     )
     canvas.create_text(
-        width // 2, 85,
+        width // 2,
+        85,
         text="Enter 确认 | R 重绘 | Esc 取消",
-        fill="#FFFF00", font=("Arial", 18),
+        fill="#FFFF00",
+        font=("Arial", 18),
         tags="instruction",
     )
 
@@ -90,8 +94,13 @@ def select_region(
         start_abs = (event.x_root, event.y_root)
         current_abs = start_abs
         rect_id = canvas.create_rectangle(
-            event.x, event.y, event.x, event.y,
-            outline="#00FF00", width=4, dash=(10, 5),
+            event.x,
+            event.y,
+            event.x,
+            event.y,
+            outline="#00FF00",
+            width=4,
+            dash=(10, 5),
         )
 
     def on_drag(event):
@@ -117,7 +126,9 @@ def select_region(
                     root.update_idletasks()
                     # Schedule callback after compositor has time to flush
                     if on_confirm is not None:
-                        root.after(400, lambda: on_confirm(result))
+                        confirmed_result = result
+                        callback = on_confirm
+                        root.after(400, lambda: callback(confirmed_result))
                     # Delay quit to allow the callback to execute
                     root.after(450, root.quit)
         elif event.keysym in ("r", "R"):

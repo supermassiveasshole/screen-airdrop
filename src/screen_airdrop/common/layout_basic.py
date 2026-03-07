@@ -1,4 +1,4 @@
-"""Layout contract and binary extension for V3.1 locator pipeline."""
+"""Layout contract and binary extension for the basic locator pipeline."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ FLAG_RESERVED_ALIGNMENT = 1 << 1
 
 
 class LayoutInfoError(ValueError):
-    """Raised when LayoutInfoV31 payload is invalid."""
+    """Raised when LayoutInfoBasic payload is invalid."""
 
 
 class TimingMode(enum.IntEnum):
@@ -36,7 +36,7 @@ DEFAULT_GRID_H = 96
 
 
 @dataclass(frozen=True)
-class LayoutInfoV31:
+class LayoutInfoBasic:
     layout_ver: int = LAYOUT_V31_VERSION
     quiet: int = DEFAULT_QUIET
     finder: int = DEFAULT_FINDER
@@ -99,7 +99,7 @@ class LayoutInfoV31:
         )
 
     @classmethod
-    def unpack(cls, data: bytes) -> "LayoutInfoV31":
+    def unpack(cls, data: bytes) -> "LayoutInfoBasic":
         if len(data) < _LAYOUT_INFO_STRUCT.size:
             raise LayoutInfoError("layout info too short")
         fields = _LAYOUT_INFO_STRUCT.unpack(data[: _LAYOUT_INFO_STRUCT.size])

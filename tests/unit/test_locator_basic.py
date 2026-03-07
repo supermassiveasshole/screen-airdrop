@@ -1,14 +1,14 @@
 import numpy as np
 
-from screen_airdrop.common.protocol_v3 import V3_FRAME_DATA, FrameHeaderV3
-from screen_airdrop.receiver.locator_v31 import LocateError, LocatorConfig, locate_frame
-from screen_airdrop.sender.encoder_v31 import encode_frame_v31
+from screen_airdrop.common.protocol_basic import FRAME_DATA, FrameHeaderBasic
+from screen_airdrop.receiver.locator_basic import LocateError, LocatorConfig, locate_frame
+from screen_airdrop.sender.encoder_basic import encode_frame_basic
 
 
 def test_locator_v31_returns_modules_and_quad_contract():
     payload = b"locator-v31-roundtrip"
-    header = FrameHeaderV3.make(
-        frame_type=V3_FRAME_DATA,
+    header = FrameHeaderBasic.make(
+        frame_type=FRAME_DATA,
         session_id=1,
         epoch_id=0,
         frame_id=1,
@@ -16,7 +16,7 @@ def test_locator_v31_returns_modules_and_quad_contract():
         chunk_id=0,
         payload=payload,
     )
-    frame = encode_frame_v31(
+    frame = encode_frame_basic(
         header=header,
         payload=payload,
         width=1920,
@@ -37,8 +37,8 @@ def test_locator_v31_returns_modules_and_quad_contract():
 
 def test_locator_v31_roi_offset_is_global_coordinates():
     payload = b"locator-v31-roi"
-    header = FrameHeaderV3.make(
-        frame_type=V3_FRAME_DATA,
+    header = FrameHeaderBasic.make(
+        frame_type=FRAME_DATA,
         session_id=2,
         epoch_id=0,
         frame_id=1,
@@ -46,7 +46,7 @@ def test_locator_v31_roi_offset_is_global_coordinates():
         chunk_id=0,
         payload=payload,
     )
-    frame = encode_frame_v31(header=header, payload=payload, width=1280, height=720)
+    frame = encode_frame_basic(header=header, payload=payload, width=1280, height=720)
     loc_full = locate_frame(frame, config=LocatorConfig(grid_w=160, grid_h=96))
     assert not isinstance(loc_full, LocateError)
     bx0 = int(np.min(loc_full.quad_src[:, 0]))

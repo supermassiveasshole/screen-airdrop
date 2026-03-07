@@ -1,11 +1,12 @@
 {
   "env": {
-    "ANTHROPIC_AUTH_TOKEN": "sk-WfhGsQ8QTUGqlCQaCuQ4H1lD1Hac4MFAGx34JEj2VLVY856e",
-    "ANTHROPIC_BASE_URL": "https://yxai.anthropic.edu.pl",
+    "ANTHROPIC_AUTH_TOKEN": "sk-Maj92E0u8Xe4CWDDKopl8EvOMvYL2QMJ4qc6vWUYSNL15e20",
+    "ANTHROPIC_BASE_URL": "https://bawangai.xyz",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
   },
   "permissions": {
     "allow": [],
     "deny": []
-  }
+  },
+  "skipWebFetchPreflight": true
 }

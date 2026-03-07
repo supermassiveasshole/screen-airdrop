@@ -1,4 +1,4 @@
-"""V3.1 locator engine with explicit geometry/payload separation."""
+"""Basic locator engine with explicit geometry/payload separation."""
 
 from __future__ import annotations
 
@@ -10,10 +10,15 @@ from typing import Any, Dict, Optional, Tuple
 import cv2
 import numpy as np
 
-from screen_airdrop.common.layout_v31 import DEFAULT_FINDER, DEFAULT_GRID_H, DEFAULT_GRID_W, DEFAULT_GUARD
-from screen_airdrop.receiver.detector_v3 import detect_symbol_quad
-from screen_airdrop.receiver.detector_v31 import detect_symbol_bbox_v31
-from screen_airdrop.sender.encoder_v31 import V31Layout, build_layout_v31
+from screen_airdrop.common.layout_basic import (
+    DEFAULT_FINDER,
+    DEFAULT_GRID_H,
+    DEFAULT_GRID_W,
+    DEFAULT_GUARD,
+)
+from screen_airdrop.receiver.detector_basic import detect_symbol_quad
+from screen_airdrop.receiver.detector_basic import detect_symbol_bbox
+from screen_airdrop.sender.encoder_basic import BasicLayout, build_layout_basic
 
 
 class LocateFailReason(str, enum.Enum):
@@ -110,7 +115,7 @@ def _score_geometry(quad: np.ndarray) -> float:
 def _warp_and_grid(
     frame: np.ndarray,
     quad_src: np.ndarray,
-    layout: V31Layout,
+    layout: BasicLayout,
     warp_size: int,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Tuple[int, int, int, int], float]:
     fw = float(layout.frame_w)
@@ -127,7 +132,9 @@ def _warp_and_grid(
         [
             _module_to_px(layout.quiet + c2, layout.quiet + c2),
             _module_to_px(layout.frame_w - layout.quiet - c2 - 1, layout.quiet + c2),
-            _module_to_px(layout.frame_w - layout.quiet - c2 - 1, layout.frame_h - layout.quiet - c2 - 1),
+            _module_to_px(
+                layout.frame_w - layout.quiet - c2 - 1, layout.frame_h - layout.quiet - c2 - 1
+            ),
             _module_to_px(layout.quiet + c2, layout.frame_h - layout.quiet - c2 - 1),
         ],
         dtype=np.float32,
@@ -165,7 +172,12 @@ def _warp_and_grid(
     sym_bl = src[0] - (ux * mx_tl) + (uy * (fh - 1.0 - my_tl))
     sym_src = np.array([sym_tl, sym_tr, sym_br, sym_bl], dtype=np.float32)
     dst_corners = np.array(
-        [[0.0, 0.0], [float(out_w - 1), 0.0], [float(out_w - 1), float(out_h - 1)], [0.0, float(out_h - 1)]],
+        [
+            [0.0, 0.0],
+            [float(out_w - 1), 0.0],
+            [float(out_w - 1), float(out_h - 1)],
+            [0.0, float(out_h - 1)],
+        ],
         dtype=np.float32,
     )
     proj = cv2.perspectiveTransform(sym_src.reshape(1, 4, 2), h).reshape(4, 2)
@@ -176,7 +188,7 @@ def _warp_and_grid(
 
 def _estimate_timing_phase(
     warped: np.ndarray,
-    layout: V31Layout,
+    layout: BasicLayout,
     grid_bbox: Tuple[int, int, int, int],
 ) -> Tuple[float, float, float, float, float]:
     x, y, w, h = grid_bbox
@@ -220,7 +232,9 @@ def _estimate_timing_phase(
     return row_score, col_score, timing_score, phi_x, phi_y
 
 
-def _sample_modules_3x3(warped: np.ndarray, layout: V31Layout, phi_x: float, phi_y: float) -> Tuple[np.ndarray, float]:
+def _sample_modules_3x3(
+    warped: np.ndarray, layout: BasicLayout, phi_x: float, phi_y: float
+) -> Tuple[np.ndarray, float]:
     gray = warped.mean(axis=2).astype(np.float32) / 255.0
     gray_u8 = (gray * 255.0).astype(np.uint8)
     thr_u8, _ = cv2.threshold(gray_u8, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
@@ -236,25 +250,36 @@ def _sample_modules_3x3(warped: np.ndarray, layout: V31Layout, phi_x: float, phi
 
     # Accumulate votes from all 9 sub-cell offsets fully vectorised.
     # For each offset (oy, ox), gather gray[py[j], px[i]] for all (j,i) at once.
-    offsets = [(-0.25, -0.25), (-0.25, 0.0), (-0.25, 0.25),
-               (0.0,  -0.25), (0.0,  0.0), (0.0,  0.25),
-               (0.25, -0.25), (0.25, 0.0), (0.25, 0.25)]
+    offsets = [
+        (-0.25, -0.25),
+        (-0.25, 0.0),
+        (-0.25, 0.25),
+        (0.0, -0.25),
+        (0.0, 0.0),
+        (0.0, 0.25),
+        (0.25, -0.25),
+        (0.25, 0.0),
+        (0.25, 0.25),
+    ]
     vote_sum = np.zeros((layout.frame_h, layout.frame_w), dtype=np.float32)
     for oy, ox in offsets:
         py = np.clip(np.round(cy_base + oy * cell_h).astype(np.int32), 0, h_max)  # (frame_h,)
         px = np.clip(np.round(cx_base + ox * cell_w).astype(np.int32), 0, w_max)  # (frame_w,)
-        vote_sum += gray[py[:, None], px[None, :]]   # (frame_h, frame_w) gather
+        vote_sum += gray[py[:, None], px[None, :]]  # (frame_h, frame_w) gather
 
     modules = (vote_sum >= thr * 9.0).view(np.uint8)
 
     # Contrast: std of per-cell mean values in the data grid region
-    grid_means = vote_sum[layout.grid_y0:layout.grid_y1 + 1,
-                          layout.grid_x0:layout.grid_x1 + 1] / 9.0
+    grid_means = (
+        vote_sum[layout.grid_y0 : layout.grid_y1 + 1, layout.grid_x0 : layout.grid_x1 + 1] / 9.0
+    )
     contrast = float(np.clip(float(np.std(grid_means)) * 2.0, 0.0, 1.0))
     return modules, contrast
 
 
-def _bbox_from_quad(quad: np.ndarray, frame_shape: Tuple[int, int, int]) -> Tuple[int, int, int, int]:
+def _bbox_from_quad(
+    quad: np.ndarray, frame_shape: Tuple[int, int, int]
+) -> Tuple[int, int, int, int]:
     h, w = frame_shape[:2]
     x1 = max(0, int(np.floor(float(np.min(quad[:, 0])))))
     y1 = max(0, int(np.floor(float(np.min(quad[:, 1])))))
@@ -288,7 +313,7 @@ def locate_frame(
 ) -> LocateResult | LocateError:
     t0 = time.perf_counter()
     cfg = config if config is not None else LocatorConfig()
-    layout = build_layout_v31(
+    layout = build_layout_basic(
         grid_w=cfg.grid_w,
         grid_h=cfg.grid_h,
         guard_band=cfg.guard_band,
@@ -302,7 +327,7 @@ def locate_frame(
     det = detect_symbol_quad(view)
     if det is None:
         # Fallback: still keep ROI semantics, but allow bbox-based quad synthesis.
-        b = detect_symbol_bbox_v31(view)
+        b = detect_symbol_bbox(view)
         if b is None:
             elapsed = (time.perf_counter() - t0) * 1000.0
             return LocateError(LocateFailReason.NO_FINDER, 0.0, elapsed, debug)
@@ -311,15 +336,19 @@ def locate_frame(
             [[bx, by], [bx + bw, by], [bx + bw, by + bh], [bx, by + bh]],
             dtype=np.float32,
         )
+
         class _Tmp:
             quad = det_quad
             confidence = float(max(0.5, b.confidence))
+
         det = _Tmp()
 
     quad = det.quad.astype(np.float32).copy()
     quad[:, 0] += float(rx)
     quad[:, 1] += float(ry)
-    debug["finder_candidates"].append({"bbox": list(_bbox_from_quad(quad, frame.shape)), "score": float(det.confidence)})
+    debug["finder_candidates"].append(
+        {"bbox": list(_bbox_from_quad(quad, frame.shape)), "score": float(det.confidence)}
+    )
     finder_score = float(np.clip(det.confidence, 0.0, 1.0))
     geom_score = _score_geometry(quad)
     if geom_score <= 0.05:
@@ -327,12 +356,16 @@ def locate_frame(
         return LocateError(LocateFailReason.BAD_GEOMETRY, finder_score, elapsed, debug)
 
     try:
-        warped, h, inv, grid_bbox, rmse = _warp_and_grid(frame, quad, layout=layout, warp_size=cfg.warp_size)
+        warped, h, inv, grid_bbox, rmse = _warp_and_grid(
+            frame, quad, layout=layout, warp_size=cfg.warp_size
+        )
     except Exception:
         elapsed = (time.perf_counter() - t0) * 1000.0
         return LocateError(LocateFailReason.WARP_FAIL, finder_score, elapsed, debug)
 
-    row_score, col_score, timing_score, phi_x, phi_y = _estimate_timing_phase(warped, layout, grid_bbox)
+    row_score, col_score, timing_score, phi_x, phi_y = _estimate_timing_phase(
+        warped, layout, grid_bbox
+    )
     timing_used = timing_score >= cfg.timing_threshold
 
     modules, contrast = _sample_modules_3x3(warped, layout=layout, phi_x=phi_x, phi_y=phi_y)
@@ -399,7 +432,7 @@ def locate_frame_legacy(
 ) -> LocateResult | LocateError:
     t0 = time.perf_counter()
     cfg = config if config is not None else LocatorConfig()
-    layout = build_layout_v31(
+    layout = build_layout_basic(
         grid_w=cfg.grid_w,
         grid_h=cfg.grid_h,
         guard_band=cfg.guard_band,
@@ -416,7 +449,7 @@ def locate_frame_legacy(
         base_conf = float(max(0.5, quad_det.confidence))
         finder_candidates = [{"bbox": list(_bbox_from_quad(quad, frame.shape)), "score": base_conf}]
     else:
-        det = detect_symbol_bbox_v31(view)
+        det = detect_symbol_bbox(view)
         if det is None:
             elapsed = (time.perf_counter() - t0) * 1000.0
             return LocateError(LocateFailReason.NO_FINDER, 0.0, elapsed, {"roi_offset": [rx, ry]})
@@ -430,10 +463,14 @@ def locate_frame_legacy(
         finder_candidates = [{"bbox": [int(bx), int(by), int(bw), int(bh)], "score": base_conf}]
 
     try:
-        warped, h, inv, grid_bbox, rmse = _warp_and_grid(frame, quad, layout=layout, warp_size=cfg.warp_size)
+        warped, h, inv, grid_bbox, rmse = _warp_and_grid(
+            frame, quad, layout=layout, warp_size=cfg.warp_size
+        )
     except Exception:
         elapsed = (time.perf_counter() - t0) * 1000.0
-        return LocateError(LocateFailReason.WARP_FAIL, float(base_conf), elapsed, {"roi_offset": [rx, ry]})
+        return LocateError(
+            LocateFailReason.WARP_FAIL, float(base_conf), elapsed, {"roi_offset": [rx, ry]}
+        )
 
     modules, contrast = _sample_modules_3x3(warped, layout=layout, phi_x=0.0, phi_y=0.0)
     confidence = float(np.clip(0.65 * base_conf + 0.35 * contrast, 0.0, 1.0))

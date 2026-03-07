@@ -4,7 +4,7 @@ from pathlib import Path
 import cv2
 import pytest
 
-from screen_airdrop.receiver.decoder_v31 import decode_frame_v31
+from screen_airdrop.receiver.decoder_basic import decode_frame_basic
 
 
 @pytest.mark.real_data
@@ -32,7 +32,7 @@ def test_v31_regression_dataset_all_frames_decodable():
         locator_engine = str(case.get("locator_engine", default.get("locator_engine", "new")))
 
         try:
-            header, payload, _meta = decode_frame_v31(
+            header, payload, _meta = decode_frame_basic(
                 frame=img,
                 detect_mode="full",
                 grid_w=gw,
@@ -45,7 +45,7 @@ def test_v31_regression_dataset_all_frames_decodable():
             failures.append((case_id, "decode failed", str(exc)))
 
     if failures:
-        lines = ["V3.1 regression dataset decode failures:"]
+        lines = ["Basic regression dataset decode failures:"]
         for cid, reason, detail in failures:
             lines.append(f"- {cid}: {reason} | {detail}")
         raise AssertionError("\n".join(lines))

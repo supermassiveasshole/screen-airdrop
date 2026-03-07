@@ -1,4 +1,4 @@
-"""V3.1 decoder: locator-engine + payload decode over module matrix."""
+"""Basic decoder: locator-engine + payload decode over module matrix."""
 
 from __future__ import annotations
 
@@ -8,18 +8,19 @@ from typing import Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
-from screen_airdrop.common.layout_v31 import LayoutInfoError, LayoutInfoV31
-from screen_airdrop.common.protocol_v3 import (
-    V3_DEFAULT_GRID_H,
-    V3_DEFAULT_GRID_W,
-    V3_ECC_Q,
-    V3_FORMAT_SIZE,
-    V3_ID_TO_ECC,
-    FormatInfoV3,
-    FrameHeaderV3,
+from screen_airdrop.common.layout_basic import LayoutInfoBasic, LayoutInfoError
+from screen_airdrop.common.protocol_basic import (
+    DEFAULT_GRID_H,
+    DEFAULT_GRID_W,
+    ECC_Q,
+    FORMAT_SIZE,
+    ID_TO_ECC,
+    FormatInfoBasic,
+    FrameHeaderBasic,
     decode_header_and_payload_bits,
 )
-from screen_airdrop.receiver.locator_v31 import (
+from screen_airdrop.receiver.detector_basic import detect_symbol_quad
+from screen_airdrop.receiver.locator_basic import (
     LocateError,
     LocateFailReason,
     LocateResult,
@@ -27,12 +28,11 @@ from screen_airdrop.receiver.locator_v31 import (
     locate_frame,
     locate_frame_legacy,
 )
-from screen_airdrop.receiver.detector_v3 import detect_symbol_quad
-from screen_airdrop.sender.encoder_v31 import V31Layout, build_layout_v31
+from screen_airdrop.sender.encoder_basic import BasicLayout, build_layout_basic
 
 
 @dataclass
-class DecodeMetaV31:
+class DecodeMetaBasic:
     protocol_version_used: int
     locator_engine: str
     confidence: float
@@ -72,9 +72,9 @@ def _mask_bit(mask_id: int, x: int, y: int) -> int:
     return (((x + y) % 2) + ((x * y) % 3)) & 1
 
 
-def _read_format_bits(modules: np.ndarray, layout: V31Layout) -> bytes:
+def _read_format_bits(modules: np.ndarray, layout: BasicLayout) -> bytes:
     bits = [int(modules[y, x]) for x, y in layout.format_coords]
-    unit_len = (V3_FORMAT_SIZE + 2) * 8
+    unit_len = (FORMAT_SIZE + 2) * 8
     if len(bits) < unit_len:
         raise ValueError("format area too small")
     raw_bits = bits[: unit_len * 3]
@@ -95,10 +95,10 @@ def _read_format_bits(modules: np.ndarray, layout: V31Layout) -> bytes:
     return bytes(out)
 
 
-def _read_layout_info(modules: np.ndarray, layout: V31Layout) -> Optional[LayoutInfoV31]:
+def _read_layout_info(modules: np.ndarray, layout: BasicLayout) -> Optional[LayoutInfoBasic]:
     if not layout.layout_coords:
         return None
-    need_bits = 2 * len(LayoutInfoV31().pack()) * 8
+    need_bits = 2 * len(LayoutInfoBasic().pack()) * 8
     bits = [int(modules[y, x]) for x, y in layout.layout_coords[:need_bits]]
     if len(bits) < need_bits:
         return None
@@ -114,21 +114,23 @@ def _read_layout_info(modules: np.ndarray, layout: V31Layout) -> Optional[Layout
             v = (v << 1) | int(b)
         raw.append(v)
     try:
-        return LayoutInfoV31.unpack(bytes(raw))
+        return LayoutInfoBasic.unpack(bytes(raw))
     except LayoutInfoError:
         return None
 
 
-def _decode_modules(modules: np.ndarray, layout: V31Layout) -> Tuple[FrameHeaderV3, bytes, int]:
+def _decode_modules(
+    modules: np.ndarray, layout: BasicLayout
+) -> Tuple[FrameHeaderBasic, bytes, int]:
     mask_candidates: List[int]
     ecc_candidates: List[str]
     try:
-        fmt = FormatInfoV3.unpack(_read_format_bits(modules, layout))
+        fmt = FormatInfoBasic.unpack(_read_format_bits(modules, layout))
         mask_candidates = [int(fmt.mask_id)]
-        ecc_candidates = [V3_ID_TO_ECC.get(int(fmt.ecc_id), V3_ECC_Q)]
+        ecc_candidates = [ID_TO_ECC.get(int(fmt.ecc_id), ECC_Q)]
     except Exception:
         mask_candidates = [3]
-        ecc_candidates = [V3_ECC_Q]
+        ecc_candidates = [ECC_Q]
 
     last_exc = None
     for mask_id in mask_candidates:
@@ -146,15 +148,15 @@ def _decode_modules(modules: np.ndarray, layout: V31Layout) -> Tuple[FrameHeader
                 last_exc = exc
     if last_exc is not None:
         raise last_exc
-    raise RuntimeError("v3_1 decode failed")
+    raise RuntimeError("basic decode failed")
 
 
-def _build_layout_v31_compat(
+def _build_layout_basic_compat(
     grid_w: int,
     grid_h: int,
     guard_band: int,
     corner_size: int,
-) -> V31Layout:
+) -> BasicLayout:
     q = 4
     guard = max(1, int(guard_band))
     corner = max(7, int(corner_size))
@@ -166,7 +168,7 @@ def _build_layout_v31_compat(
     x1 = grid_w - q - corner - guard - 2
     y1 = grid_h - q - corner - guard - 2
     if x1 <= x0 or y1 <= y0:
-        raise ValueError("v3_1 legacy compat layout too small")
+        raise ValueError("basic legacy compat layout too small")
 
     data_coords = []
     for y in range(y0, y1 + 1):
@@ -181,7 +183,7 @@ def _build_layout_v31_compat(
     for y in range(q + corner + 1, grid_h - q - corner - 1):
         format_coords.append((fx, y))
 
-    return V31Layout(
+    return BasicLayout(
         frame_w=int(grid_w),
         frame_h=int(grid_h),
         grid_w=int(grid_w),
@@ -196,7 +198,7 @@ def _build_layout_v31_compat(
         data_coords=data_coords,
         format_coords=format_coords,
         layout_coords=[],
-        layout_info=LayoutInfoV31(grid_w=160, grid_h=96),
+        layout_info=LayoutInfoBasic(grid_w=160, grid_h=96),
     )
 
 
@@ -233,13 +235,17 @@ def _warp_from_finder_centers_compat(
     return cv2.warpPerspective(frame, hmat, (out_w, out_h), flags=cv2.INTER_NEAREST)
 
 
-def _sample_modules_from_crop(crop: np.ndarray, grid_w: int, grid_h: int, threshold: float) -> np.ndarray:
+def _sample_modules_from_crop(
+    crop: np.ndarray, grid_w: int, grid_h: int, threshold: float
+) -> np.ndarray:
     gray = crop.mean(axis=2).astype(np.uint8)
     down = cv2.resize(gray, (grid_w, grid_h), interpolation=cv2.INTER_AREA)
     return (down.astype(np.float32) >= float(threshold)).astype(np.uint8)
 
 
-def _bbox_from_quad(quad: np.ndarray, frame_shape: Tuple[int, int, int]) -> tuple[int, int, int, int]:
+def _bbox_from_quad(
+    quad: np.ndarray, frame_shape: Tuple[int, int, int]
+) -> tuple[int, int, int, int]:
     h, w = frame_shape[:2]
     x1 = max(0, int(np.floor(float(np.min(quad[:, 0])))))
     y1 = max(0, int(np.floor(float(np.min(quad[:, 1])))))
@@ -295,19 +301,19 @@ def _run_locator(
     return legacy_res, "legacy", new_err, legacy_err
 
 
-def decode_frame_v31(
+def decode_frame_basic(
     frame: np.ndarray,
     detect_mode: str = "full",
     forced_roi: Optional[Tuple[int, int, int, int]] = None,
-    grid_w: int = V3_DEFAULT_GRID_W,
-    grid_h: int = V3_DEFAULT_GRID_H,
+    grid_w: int = DEFAULT_GRID_W,
+    grid_h: int = DEFAULT_GRID_H,
     guard_band: int = 2,
     corner_size: int = 9,
     roi_only: bool = False,
     manual_strict: bool = False,
     locator_engine: str = "auto",
     locator_confidence_threshold: float = 0.55,
-) -> Tuple[FrameHeaderV3, bytes, DecodeMetaV31]:
+) -> Tuple[FrameHeaderBasic, bytes, DecodeMetaBasic]:
     if detect_mode not in ("full", "track", "roi"):
         raise ValueError("invalid detect_mode")
     if locator_engine not in ("new", "legacy", "auto"):
@@ -338,10 +344,12 @@ def decode_frame_v31(
         cfg=cfg,
     )
 
-    layout = build_layout_v31(grid_w=grid_w, grid_h=grid_h, guard_band=guard_band, corner_size=corner_size)
+    layout = build_layout_basic(
+        grid_w=grid_w, grid_h=grid_h, guard_band=guard_band, corner_size=corner_size
+    )
     parsed = _read_layout_info(loc.modules, layout)
     if parsed is not None:
-        layout = build_layout_v31(
+        layout = build_layout_basic(
             grid_w=parsed.grid_w,
             grid_h=parsed.grid_h,
             guard_band=parsed.guard,
@@ -355,32 +363,36 @@ def decode_frame_v31(
         try:
             header, payload, mask_id = _decode_modules(cand, layout)
             bbox = _bbox_from_quad(loc.quad_src, frame.shape)
-            return header, payload, DecodeMetaV31(
-                protocol_version_used=31,
-                locator_engine=used_engine,
-                confidence=float(loc.quality.confidence),
-                fail_reason="" if loc.fail_reason is None else loc.fail_reason.value,
-                elapsed_ms=float(loc.elapsed_ms),
-                legacy_used=bool(loc.legacy_used),
-                homography_rmse=float(loc.quality.warp_rmse),
-                rs_corrected_symbols=0,
-                crc_ok=True,
-                mask_id=int(mask_id),
-                grid_size="{0}x{1}".format(layout.grid_w, layout.grid_h),
-                det_bbox=bbox,
-                decode_attempts=attempts,
-                det_confidence=float(loc.quality.confidence),
-                new_fail_reason="" if new_err is None else new_err.fail_reason.value,
-                new_elapsed_ms=0.0 if new_err is None else float(new_err.elapsed_ms),
-                legacy_elapsed_ms=float(loc.elapsed_ms) if loc.legacy_used else 0.0,
-                locator_debug_artifacts=dict(loc.debug_artifacts),
-                locator_warped_preview=loc.warped.copy(),
+            return (
+                header,
+                payload,
+                DecodeMetaBasic(
+                    protocol_version_used=31,
+                    locator_engine=used_engine,
+                    confidence=float(loc.quality.confidence),
+                    fail_reason="" if loc.fail_reason is None else loc.fail_reason.value,
+                    elapsed_ms=float(loc.elapsed_ms),
+                    legacy_used=bool(loc.legacy_used),
+                    homography_rmse=float(loc.quality.warp_rmse),
+                    rs_corrected_symbols=0,
+                    crc_ok=True,
+                    mask_id=int(mask_id),
+                    grid_size="{0}x{1}".format(layout.grid_w, layout.grid_h),
+                    det_bbox=bbox,
+                    decode_attempts=attempts,
+                    det_confidence=float(loc.quality.confidence),
+                    new_fail_reason="" if new_err is None else new_err.fail_reason.value,
+                    new_elapsed_ms=0.0 if new_err is None else float(new_err.elapsed_ms),
+                    legacy_elapsed_ms=float(loc.elapsed_ms) if loc.legacy_used else 0.0,
+                    locator_debug_artifacts=dict(loc.debug_artifacts),
+                    locator_warped_preview=loc.warped.copy(),
+                ),
             )
         except Exception as exc:  # noqa: PERF203
             last_exc = exc
 
     if last_exc is not None:
-        # Compatibility fallback for older v3.1 sender layout (pre absolute-layout refactor).
+        # Compatibility fallback for an older basic sender layout (pre absolute-layout refactor).
         try:
             qdet = detect_symbol_quad(frame)
             if qdet is not None:
@@ -391,7 +403,7 @@ def decode_frame_v31(
                     grid_h=grid_h,
                     corner_size=corner_size,
                 )
-                layout_compat = _build_layout_v31_compat(
+                layout_compat = _build_layout_basic_compat(
                     grid_w=grid_w,
                     grid_h=grid_h,
                     guard_band=guard_band,
@@ -401,31 +413,37 @@ def decode_frame_v31(
                 thr_a = float(np.mean(gray))
                 thr_b, _ = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
                 for thr in (thr_a, float(thr_b)):
-                    modules = _sample_modules_from_crop(warped, grid_w=grid_w, grid_h=grid_h, threshold=thr)
+                    modules = _sample_modules_from_crop(
+                        warped, grid_w=grid_w, grid_h=grid_h, threshold=thr
+                    )
                     for cand in (modules, (1 - modules).astype(np.uint8)):
                         try:
                             header, payload, mask_id = _decode_modules(cand, layout_compat)
                             bbox = _bbox_from_quad(qdet.quad.astype(np.float32), frame.shape)
-                            return header, payload, DecodeMetaV31(
-                                protocol_version_used=31,
-                                locator_engine="new",
-                                confidence=0.0,
-                                fail_reason="",
-                                elapsed_ms=0.0,
-                                legacy_used=False,
-                                homography_rmse=0.0,
-                                rs_corrected_symbols=0,
-                                crc_ok=True,
-                                mask_id=int(mask_id),
-                                grid_size="{0}x{1}".format(grid_w, grid_h),
-                                det_bbox=bbox,
-                                decode_attempts=attempts + 1,
-                                det_confidence=0.0,
-                                new_fail_reason="",
-                                new_elapsed_ms=0.0,
-                                legacy_elapsed_ms=0.0,
-                                locator_debug_artifacts={},
-                                locator_warped_preview=warped.copy(),
+                            return (
+                                header,
+                                payload,
+                                DecodeMetaBasic(
+                                    protocol_version_used=31,
+                                    locator_engine="new",
+                                    confidence=0.0,
+                                    fail_reason="",
+                                    elapsed_ms=0.0,
+                                    legacy_used=False,
+                                    homography_rmse=0.0,
+                                    rs_corrected_symbols=0,
+                                    crc_ok=True,
+                                    mask_id=int(mask_id),
+                                    grid_size="{0}x{1}".format(grid_w, grid_h),
+                                    det_bbox=bbox,
+                                    decode_attempts=attempts + 1,
+                                    det_confidence=0.0,
+                                    new_fail_reason="",
+                                    new_elapsed_ms=0.0,
+                                    legacy_elapsed_ms=0.0,
+                                    locator_debug_artifacts={},
+                                    locator_warped_preview=warped.copy(),
+                                ),
                             )
                         except Exception:
                             pass
@@ -440,4 +458,4 @@ def decode_frame_v31(
                 "" if legacy_err is None else legacy_err.fail_reason.value,
             )
         )
-    raise RuntimeError("v3_1 decode failed")
+    raise RuntimeError("basic decode failed")

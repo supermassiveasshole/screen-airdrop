@@ -7,14 +7,14 @@ def test_epochs_zero_means_infinite_loop(tmp_path):
 
     gen = build_encoded_frames(
         input_path=str(sample),
-        protocol="v2",
+        protocol="basic",
         compress="none",
         sync_frames=0,
         epochs=0,
     )
 
     first = next(gen)
-    items = [first] + [next(gen) for _ in range(20)]
+    items = [first] + [next(gen) for _ in range(63)]
 
     # We should see at least one frame from epoch 1, proving the generator
     # continues past the first epoch when epochs=0.
@@ -27,7 +27,7 @@ def test_manifest_is_repeated_at_start_of_each_epoch(tmp_path):
 
     gen = build_encoded_frames(
         input_path=str(sample),
-        protocol="v2",
+        protocol="basic",
         compress="none",
         sync_frames=0,
         manifest_repeat=3,

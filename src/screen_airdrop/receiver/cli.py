@@ -7,27 +7,24 @@ import json
 import os
 import sys
 import time
-from typing import Any, Dict, Optional, Tuple, cast
+from typing import Any, Dict, Mapping, Optional, Tuple, cast
 
 import numpy as np
 
-from screen_airdrop.common.protocol import FRAME_DATA
-from screen_airdrop.common.protocol_v3 import V3_FRAME_DATA
+from screen_airdrop.common.protocol_basic import FRAME_DATA
 from screen_airdrop.receiver.assembler import ChunkAssembler
 from screen_airdrop.receiver.capture_mss import ScreenCapture, get_monitor_region
-from screen_airdrop.receiver.decoder import decode_frame
-from screen_airdrop.receiver.decoder_v3 import decode_frame_v3
-from screen_airdrop.receiver.decoder_v31 import decode_frame_v31
-from screen_airdrop.receiver.detector_v31 import detect_symbol_bbox_v31
+from screen_airdrop.receiver.decoder_basic import decode_frame_basic
+from screen_airdrop.receiver.detector_basic import detect_symbol_bbox
 from screen_airdrop.receiver.frame_replay_source import FrameReplaySource
-from screen_airdrop.receiver.locator import calibrate_threshold, detect_locator_bbox
-from screen_airdrop.receiver.locator_v31 import LocateError as LocateErrorV31
-from screen_airdrop.receiver.locator_v31 import LocatorConfig, locate_frame
+from screen_airdrop.receiver.locator_basic import LocateError as LocateErrorV31
+from screen_airdrop.receiver.locator_basic import LocatorConfig, locate_frame
 from screen_airdrop.receiver.pipeline import ReceiverPipeline
 from screen_airdrop.receiver.restore import restore_payload
 from screen_airdrop.receiver.roi_profile import load_profile, save_profile
 from screen_airdrop.receiver.roi_selector import select_region
 from screen_airdrop.receiver.stats import TransferStats
+from screen_airdrop.receiver.window_locator import resolve_window_region
 
 
 def _parse_region(raw: Optional[str]) -> Optional[Tuple[int, int, int, int]]:
@@ -61,58 +58,113 @@ def _write_report(path: Optional[str], report: dict) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="screen-airdrop receiver")
-    parser.add_argument("--source", choices=["screen", "replay"], default="screen")
-    parser.add_argument("--window-title", default=None)
+    # Source configuration
+    parser.add_argument(
+        "--source", choices=["screen", "replay"], default="screen", help="capture source"
+    )
+    parser.add_argument(
+        "--window-title", default=None, help="window title to locate (screen source)"
+    )
     parser.add_argument("--monitor-index", type=int, default=1, help="mss monitor index (1-based)")
-    parser.add_argument("--frames-dir", default=None)
+    parser.add_argument(
+        "--frames-dir", default=None, help="directory with captured frames (replay source)"
+    )
 
-    parser.add_argument("--protocol", choices=["v3_1", "v3", "v2", "v1", "auto"], default="v3_1")
-    parser.add_argument("--module-grid", default="160x96")
-    parser.add_argument("--locator-engine", choices=["new", "legacy", "auto"], default="auto")
-    parser.add_argument("--locator-confidence-threshold", type=float, default=0.55)
-    parser.add_argument("--detect-mode", choices=["full", "track", "roi"], default="track")
-    parser.add_argument("--track-margin-px", type=int, default=96)
+    # Protocol and grid configuration (information/robustness parameters)
+    parser.add_argument(
+        "--protocol",
+        choices=["basic"],
+        default="basic",
+        help="protocol name",
+    )
+    parser.add_argument(
+        "--module-grid", default="160x96", help="module grid size (must match sender)"
+    )
+    parser.add_argument(
+        "--block-size",
+        default="6",
+        help="legacy compatibility option; ignored by the basic protocol decoder",
+    )
+
+    # ROI configuration (simplified from 7 parameters to 2)
+    parser.add_argument(
+        "--roi", default=None, help="manual ROI as x,y,w,h (if not set, use auto detection)"
+    )
+    parser.add_argument(
+        "--region",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--roi-interactive", action="store_true", help="enable interactive ROI selection"
+    )
+    parser.add_argument("--select-region", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--roi-profile", default=None, help=argparse.SUPPRESS)
     parser.add_argument(
         "--roi-mode",
         choices=["auto", "manual", "auto_then_manual"],
         default="auto_then_manual",
+        help=argparse.SUPPRESS,
     )
-    parser.add_argument("--select-region", action="store_true")
-    parser.add_argument("--roi", default=None, help="x,y,w,h")
-    parser.add_argument("--roi-profile", default=None)
-
-    parser.add_argument("--output-dir", default="./recovered")
-    parser.add_argument("--block-size", default="auto")
-    parser.add_argument("--threshold", default="auto")
-    parser.add_argument("--max-idle-seconds", type=int, default=30)
-    parser.add_argument("--max-seconds", type=int, default=0)
-    parser.add_argument("--stats-interval", type=float, default=1.0)
-    parser.add_argument("--report-json", default=None)
-
-    parser.add_argument("--region", default=None, help="legacy alias of --roi")
-    parser.add_argument("--auto-fail-threshold", type=int, default=60)
-    parser.add_argument("--manual-max-retries", type=int, default=3)
+    parser.add_argument("--manual-roi-pad-px", type=int, default=0, help=argparse.SUPPRESS)
+    parser.add_argument("--manual-max-retries", type=int, default=1, help=argparse.SUPPRESS)
+    parser.add_argument("--auto-fail-threshold", type=int, default=5, help=argparse.SUPPRESS)
     parser.add_argument(
-        "--manual-roi-pad-px",
-        type=int,
-        default=0,
-        help="expand manual ROI by this many pixels on each side before decode",
+        "--detect-mode",
+        choices=["full", "track", "roi"],
+        default="track",
+        help=argparse.SUPPRESS,
     )
-    parser.add_argument("--debug-dir", default=None, help="dump debug snapshots to this directory")
-    parser.add_argument("--debug-interval", type=float, default=1.0, help="seconds between debug snapshots")
-    parser.add_argument("--debug-max-frames", type=int, default=30, help="max debug snapshots to write")
-
+    parser.add_argument("--track-margin-px", type=int, default=96, help=argparse.SUPPRESS)
     parser.add_argument(
-        "--decode-workers",
-        type=int,
-        default=0,
-        help="number of parallel decode workers (0=auto: cpu_count//2, max 4)",
+        "--locator-engine",
+        choices=["new", "legacy", "auto"],
+        default="auto",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--locator-confidence-threshold",
+        type=float,
+        default=0.55,
+        help=argparse.SUPPRESS,
+    )
+
+    # Output configuration
+    parser.add_argument(
+        "--output-dir", default="./recovered", help="output directory for recovered files"
+    )
+    parser.add_argument("--report-json", default=None, help="path to write JSON report")
+
+    # Timing configuration
+    parser.add_argument(
+        "--max-idle-seconds", type=int, default=30, help="max idle time before exit"
+    )
+    parser.add_argument("--max-seconds", type=int, default=0, help="max total time (0=unlimited)")
+    parser.add_argument(
+        "--stats-interval", type=float, default=1.0, help="stats update interval in seconds"
     )
     parser.add_argument(
         "--capture-fps",
         type=float,
         default=30.0,
-        help="target capture FPS for the capture thread (screen source only)",
+        help="target capture FPS (screen source only)",
+    )
+
+    # Debug configuration
+    parser.add_argument("--debug-dir", default=None, help="dump debug snapshots to this directory")
+    parser.add_argument(
+        "--debug-interval", type=float, default=1.0, help="seconds between debug snapshots"
+    )
+    parser.add_argument(
+        "--debug-max-frames", type=int, default=30, help="max debug snapshots to write"
+    )
+
+    # Advanced configuration
+    parser.add_argument(
+        "--decode-workers",
+        type=int,
+        default=0,
+        help="number of parallel decode workers (0=auto: cpu_count//2, max 4)",
     )
     return parser
 
@@ -254,7 +306,6 @@ def _build_pipeline_seed_roi_local(
         window_title = getattr(source, "window_title")
         explicit_region = getattr(source, "region")
         monitor_region = get_monitor_region(monitor_index)
-        from screen_airdrop.receiver.window_locator import resolve_window_region  # pylint: disable=import-outside-toplevel
 
         capture_region = resolve_window_region(
             window_title=window_title,
@@ -276,7 +327,7 @@ def _should_use_pipeline(
 ) -> bool:
     return (
         source == "screen"
-        and protocol in ("v3_1", "auto")
+        and protocol == "basic"
         and not needs_runtime_roi_selection
         and not debug_dir
     )
@@ -396,8 +447,14 @@ def _apply_v31_meta_to_debug(
     meta["elapsed_ms"] = float(getattr(v31_meta, "elapsed_ms", 0.0))
     locator_debug = getattr(v31_meta, "locator_debug_artifacts", None)
     if isinstance(locator_debug, dict):
-        if isinstance(locator_debug.get("roi_offset"), list) and len(locator_debug["roi_offset"]) == 2:
-            meta["roi_offset"] = [int(locator_debug["roi_offset"][0]), int(locator_debug["roi_offset"][1])]
+        if (
+            isinstance(locator_debug.get("roi_offset"), list)
+            and len(locator_debug["roi_offset"]) == 2
+        ):
+            meta["roi_offset"] = [
+                int(locator_debug["roi_offset"][0]),
+                int(locator_debug["roi_offset"][1]),
+            ]
         for key in (
             "finder_candidates",
             "quad_src",
@@ -493,7 +550,7 @@ def _dump_debug_snapshot(
     locator_debug: Dict[str, Any] = {}
     if v31_meta is not None:
         locator_debug = _apply_v31_meta_to_debug(meta=meta, v31_meta=v31_meta)
-    elif protocol_path_used == "v3_1":
+    elif protocol_path_used == "basic":
         # When decode fails we still run locator once for debug so overlays are visible.
         locator_debug = _probe_locator_debug(
             meta=meta,
@@ -506,29 +563,18 @@ def _dump_debug_snapshot(
         )
 
     if not manual_strict:
-        locator_proj = detect_locator_bbox(frame, threshold=threshold, use_projection=True)
-        locator_cc = detect_locator_bbox(frame, threshold=threshold, use_projection=False)
-        if locator_proj is not None:
-            _draw_rect(canvas, locator_proj.bbox, (255, 0, 255), thickness=2)
-            meta["locator_bbox_projection"] = list(locator_proj.bbox)
-            meta["locator_confidence_projection"] = float(locator_proj.confidence)
-        else:
-            meta["locator_bbox_projection"] = None
-            meta["locator_confidence_projection"] = 0.0
-        if locator_cc is not None:
-            _draw_rect(canvas, locator_cc.bbox, (0, 128, 255), thickness=2)
-            meta["locator_bbox_cc"] = list(locator_cc.bbox)
-            meta["locator_confidence_cc"] = float(locator_cc.confidence)
-        else:
-            meta["locator_bbox_cc"] = None
-            meta["locator_confidence_cc"] = 0.0
+        # Legacy locator debug removed - only basic protocol supported
+        meta["locator_bbox_projection"] = None
+        meta["locator_confidence_projection"] = 0.0
+        meta["locator_bbox_cc"] = None
+        meta["locator_confidence_cc"] = 0.0
     else:
         meta["locator_bbox_projection"] = None
         meta["locator_confidence_projection"] = 0.0
         meta["locator_bbox_cc"] = None
         meta["locator_confidence_cc"] = 0.0
 
-    # Probe v3.1 detector for debug: if forced ROI exists, probe within ROI only.
+    # Probe the basic detector for debug: if forced ROI exists, probe within ROI only.
     if forced_roi_local is not None and not manual_strict:
         fx, fy, fw, fh = forced_roi_local
         x1 = max(0, int(fx))
@@ -537,7 +583,7 @@ def _dump_debug_snapshot(
         y2 = min(frame.shape[0], int(fy + fh))
         if x1 < x2 and y1 < y2:
             probe_view = raw[y1:y2, x1:x2]
-            probe = detect_symbol_bbox_v31(probe_view)
+            probe = detect_symbol_bbox(probe_view)
             if probe is not None:
                 px, py, pw, ph = probe.bbox
                 mapped = (x1 + px, y1 + py, pw, ph)
@@ -554,7 +600,7 @@ def _dump_debug_snapshot(
             meta["v31_probe_confidence"] = 0.0
             meta["v31_probe_scope"] = "forced_roi_invalid"
     elif not manual_strict:
-        probe = detect_symbol_bbox_v31(raw)
+        probe = detect_symbol_bbox(raw)
         if probe is not None:
             _draw_rect(canvas, probe.bbox, (0, 0, 255), thickness=2)
             meta["v31_probe_bbox"] = [int(v) for v in probe.bbox]
@@ -570,23 +616,9 @@ def _dump_debug_snapshot(
 
     if forced_roi_local is not None and not manual_strict:
         _draw_rect(canvas, forced_roi_local, (0, 255, 255), thickness=3)
-        lx, ly, lw, lh = forced_roi_local
-        x1 = max(0, int(lx))
-        y1 = max(0, int(ly))
-        x2 = min(frame.shape[1], int(lx + lw))
-        y2 = min(frame.shape[0], int(ly + lh))
-        if x1 < x2 and y1 < y2:
-            sub = frame[y1:y2, x1:x2]
-            sub_locator = detect_locator_bbox(sub, threshold=threshold)
-            if sub_locator is not None:
-                sx, sy, sw, sh = sub_locator.bbox
-                mapped = (x1 + sx, y1 + sy, sw, sh)
-                _draw_rect(canvas, mapped, (0, 255, 0), thickness=2)
-                meta["locator_bbox_in_forced_roi"] = [int(v) for v in mapped]
-                meta["locator_confidence_in_forced_roi"] = float(sub_locator.confidence)
-            else:
-                meta["locator_bbox_in_forced_roi"] = None
-                meta["locator_confidence_in_forced_roi"] = 0.0
+        # Legacy locator debug removed
+        meta["locator_bbox_in_forced_roi"] = None
+        meta["locator_confidence_in_forced_roi"] = 0.0
     elif forced_roi_local is not None:
         _draw_rect(canvas, forced_roi_local, (0, 255, 255), thickness=3)
         meta["locator_bbox_in_forced_roi"] = None
@@ -630,7 +662,11 @@ def _dump_debug_snapshot(
     finder_canvas = raw.copy()
     if isinstance(locator_debug, dict):
         for cand in locator_debug.get("finder_candidates", []):
-            if isinstance(cand, dict) and isinstance(cand.get("bbox"), list) and len(cand["bbox"]) == 4:
+            if (
+                isinstance(cand, dict)
+                and isinstance(cand.get("bbox"), list)
+                and len(cand["bbox"]) == 4
+            ):
                 bbox_tuple = tuple(int(v) for v in cand["bbox"])
                 if len(bbox_tuple) == 4:
                     _draw_rect(finder_canvas, bbox_tuple, (0, 0, 255), thickness=2)  # type: ignore[arg-type]
@@ -670,7 +706,9 @@ def _dump_debug_snapshot(
                         for i in range(0, gx_count, step_x):
                             px = int(round(gx + (i + 0.5) * cell_w))
                             py = int(round(gy + (j + 0.5) * cell_h))
-                            _draw_rect(sample_overlay, (px - 1, py - 1, 3, 3), (0, 255, 255), thickness=1)
+                            _draw_rect(
+                                sample_overlay, (px - 1, py - 1, 3, 3), (0, 255, 255), thickness=1
+                            )
                 except Exception:
                     pass
         _save_debug_image(os.path.join(frame_dir, "grid_overlay.png"), grid_overlay)
@@ -734,6 +772,9 @@ def _maybe_dump_debug_snapshot(
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    if args.roi_interactive:
+        args.select_region = True
+        args.roi_mode = "manual"
     if args.source == "screen" and args.window_title and not (args.roi or args.region):
         print(
             "warning: --window-title is currently not used for real window lookup; "
@@ -769,7 +810,12 @@ def main(argv=None):
 
     stats = TransferStats()
     stats.set_roi_mode(args.roi_mode)
-    if args.source == "screen" and args.roi_mode == "manual" and forced_roi is None and args.select_region:
+    if (
+        args.source == "screen"
+        and args.roi_mode == "manual"
+        and forced_roi is None
+        and args.select_region
+    ):
         stats.mark_manual_select_attempt()
         selected = select_region(get_monitor_region(args.monitor_index))
         if selected is None:
@@ -809,7 +855,7 @@ def main(argv=None):
     last_decode_error = None  # type: Optional[str]
     last_v3_meta = None
     last_v31_meta = None
-    protocol_path_used = "v3_1" if args.protocol in ("v3_1", "auto") else ("v3" if args.protocol == "v3" else "unknown")
+    protocol_path_used = "basic"
     decode_attempt_total = 0
     fallback_hits = 0
     locator_new_fail_reason = ""
@@ -833,7 +879,9 @@ def main(argv=None):
     def _attach_v3_metrics(report: Dict[str, object]) -> None:
         if protocol_path_used:
             report["protocol_path_used"] = protocol_path_used
-        report["decode_attempts_per_frame"] = float(decode_attempt_total) / float(max(1, stats.total_frames))
+        report["decode_attempts_per_frame"] = float(decode_attempt_total) / float(
+            max(1, stats.total_frames)
+        )
         report["fallback_ratio"] = float(fallback_hits) / float(max(1, stats.valid_frames))
         report["homography_stability"] = (
             bbox_jitter_sum / float(max(1, bbox_jitter_count)) if bbox_jitter_count > 0 else 0.0
@@ -845,12 +893,14 @@ def main(argv=None):
         report["legacy_used"] = 1.0 if locator_legacy_used else 0.0
         report["legacy_elapsed_ms"] = float(locator_legacy_elapsed_ms)
 
-    def _sync_transfer_stats_from_pipeline(snap: Dict[str, int]) -> None:
+    def _sync_transfer_stats_from_pipeline(snap: Mapping[str, int | float]) -> None:
         stats.total_frames = int(snap.get("captured", 0))
         stats.valid_frames = int(snap.get("decode_ok", 0))
         stats.bad_frames = int(snap.get("decode_fail", 0))
 
-    def _attach_pipeline_metrics(report: Dict[str, object], snap: Dict[str, int]) -> None:
+    def _attach_pipeline_metrics(
+        report: Dict[str, object], snap: Mapping[str, int | float]
+    ) -> None:
         report["pipeline_captured"] = float(snap.get("captured", 0))
         report["pipeline_decode_ok"] = float(snap.get("decode_ok", 0))
         report["pipeline_decode_fail"] = float(snap.get("decode_fail", 0))
@@ -858,7 +908,9 @@ def main(argv=None):
         report["pipeline_assembled"] = float(snap.get("assembled", 0))
         report["pipeline_assembled_bytes"] = float(snap.get("assembled_bytes", 0))
         report["pipeline_dropped_frame_queue_full"] = float(snap.get("dropped_queue_full", 0))
-        report["pipeline_dropped_result_queue_full"] = float(snap.get("dropped_result_queue_full", 0))
+        report["pipeline_dropped_result_queue_full"] = float(
+            snap.get("dropped_result_queue_full", 0)
+        )
         report["pipeline_duplicate_frames"] = float(snap.get("duplicate_frames", 0))
         report["pipeline_capture_grab_time_ms"] = float(snap.get("capture_grab_time_ms", 0.0))
         report["pipeline_capture_copy_time_ms"] = float(snap.get("capture_copy_time_ms", 0.0))
@@ -867,7 +919,7 @@ def main(argv=None):
         report["pipeline_capture_copy_ops"] = float(snap.get("capture_copy_ops", 0))
         report["pipeline_capture_dedup_ops"] = float(snap.get("capture_dedup_ops", 0))
 
-    # ── Pipeline mode: screen source + v3_1/auto protocol ──────────────────────
+    # ── Pipeline mode: screen source + basic protocol ──────────────────────────
     needs_runtime_roi_selection = (
         args.source == "screen"
         and args.roi_mode == "auto_then_manual"
@@ -880,7 +932,7 @@ def main(argv=None):
         debug_dir=args.debug_dir,
         needs_runtime_roi_selection=needs_runtime_roi_selection,
     )
-    if args.debug_dir and args.source == "screen" and args.protocol in ("v3_1", "auto"):
+    if args.debug_dir and args.source == "screen" and args.protocol == "basic":
         print("debug-dir set: forcing legacy loop (pipeline disabled) to emit debug snapshots")
     if needs_runtime_roi_selection:
         print("select-region with auto_then_manual requires legacy loop for runtime ROI selection")
@@ -903,7 +955,9 @@ def main(argv=None):
             "pipeline mode: workers={0} capture_fps={1} seed_roi={2}".format(
                 num_workers if num_workers is not None else "auto",
                 args.capture_fps,
-                "none" if pipeline_seed_roi_local is None else "{0},{1},{2},{3}".format(*pipeline_seed_roi_local),
+                "none"
+                if pipeline_seed_roi_local is None
+                else "{0},{1},{2},{3}".format(*pipeline_seed_roi_local),
             )
         )
         pipeline.start()
@@ -929,7 +983,9 @@ def main(argv=None):
                 if deadline is not None and now > deadline:
                     snap = pipeline.stats.snapshot()
                     _sync_transfer_stats_from_pipeline(snap)
-                    final_report = cast(Dict[str, object], dict(stats.finalize(output_size_bytes=0, ts=now)))
+                    final_report = cast(
+                        Dict[str, object], dict(stats.finalize(output_size_bytes=0, ts=now))
+                    )
                     _attach_pipeline_metrics(final_report, snap)
                     final_report["status"] = "timeout_max_seconds"
                     _write_report(args.report_json, final_report)
@@ -943,7 +999,9 @@ def main(argv=None):
                     last_assembled_ts = now
                 elif now - last_assembled_ts > args.max_idle_seconds and assembled > 0:
                     _sync_transfer_stats_from_pipeline(snap)
-                    final_report = cast(Dict[str, object], dict(stats.finalize(output_size_bytes=0, ts=now)))
+                    final_report = cast(
+                        Dict[str, object], dict(stats.finalize(output_size_bytes=0, ts=now))
+                    )
                     _attach_pipeline_metrics(final_report, snap)
                     final_report["status"] = "timeout_idle"
                     _write_report(args.report_json, final_report)
@@ -951,11 +1009,15 @@ def main(argv=None):
                     return 2
                 elif assembled == 0 and now - start > args.max_idle_seconds:
                     _sync_transfer_stats_from_pipeline(snap)
-                    final_report = cast(Dict[str, object], dict(stats.finalize(output_size_bytes=0, ts=now)))
+                    final_report = cast(
+                        Dict[str, object], dict(stats.finalize(output_size_bytes=0, ts=now))
+                    )
                     _attach_pipeline_metrics(final_report, snap)
                     final_report["status"] = "timeout_idle"
                     _write_report(args.report_json, final_report)
-                    print("receiver timeout: no valid frames for {0}s".format(args.max_idle_seconds))
+                    print(
+                        "receiver timeout: no valid frames for {0}s".format(args.max_idle_seconds)
+                    )
                     return 2
 
                 if now >= next_stats_ts:
@@ -972,28 +1034,39 @@ def main(argv=None):
                     grab_ops_now = int(snap.get("capture_grab_ops", 0))
                     copy_ops_now = int(snap.get("capture_copy_ops", 0))
                     dedup_ops_now = int(snap.get("capture_dedup_ops", 0))
-                    grab_ops_delta = max(0, grab_ops_now - int(last_capture_timing["capture_grab_ops"]))
-                    copy_ops_delta = max(0, copy_ops_now - int(last_capture_timing["capture_copy_ops"]))
-                    dedup_ops_delta = max(0, dedup_ops_now - int(last_capture_timing["capture_dedup_ops"]))
-                    grab_ms = (
-                        max(0.0, float(snap.get("capture_grab_time_ms", 0.0)) - float(last_capture_timing["capture_grab_time_ms"]))
-                        / float(max(1, grab_ops_delta))
+                    grab_ops_delta = max(
+                        0, grab_ops_now - int(last_capture_timing["capture_grab_ops"])
                     )
-                    copy_ms = (
-                        max(0.0, float(snap.get("capture_copy_time_ms", 0.0)) - float(last_capture_timing["capture_copy_time_ms"]))
-                        / float(max(1, copy_ops_delta))
+                    copy_ops_delta = max(
+                        0, copy_ops_now - int(last_capture_timing["capture_copy_ops"])
                     )
-                    dedup_ms = (
-                        max(0.0, float(snap.get("capture_dedup_time_ms", 0.0)) - float(last_capture_timing["capture_dedup_time_ms"]))
-                        / float(max(1, dedup_ops_delta))
+                    dedup_ops_delta = max(
+                        0, dedup_ops_now - int(last_capture_timing["capture_dedup_ops"])
                     )
+                    grab_ms = max(
+                        0.0,
+                        float(snap.get("capture_grab_time_ms", 0.0))
+                        - float(last_capture_timing["capture_grab_time_ms"]),
+                    ) / float(max(1, grab_ops_delta))
+                    copy_ms = max(
+                        0.0,
+                        float(snap.get("capture_copy_time_ms", 0.0))
+                        - float(last_capture_timing["capture_copy_time_ms"]),
+                    ) / float(max(1, copy_ops_delta))
+                    dedup_ms = max(
+                        0.0,
+                        float(snap.get("capture_dedup_time_ms", 0.0))
+                        - float(last_capture_timing["capture_dedup_time_ms"]),
+                    ) / float(max(1, dedup_ops_delta))
                     print(
                         "captured={0} decoded={1} assembled={2} missing={3} dropped={4} dedup={5} cap_fps={6:.2f} dec_fps={7:.2f} rx_KBps={8:.2f} grab_ms={9:.2f} copy_ms={10:.2f} dedup_ms={11:.2f}".format(
                             snap["captured"],
                             snap["decode_ok"],
                             snap["assembled"],
                             "?" if missing is None else missing,
-                            "{0}/{1}".format(snap["dropped_queue_full"], snap["dropped_result_queue_full"]),
+                            "{0}/{1}".format(
+                                snap["dropped_queue_full"], snap["dropped_result_queue_full"]
+                            ),
                             snap["duplicate_frames"],
                             cap_fps,
                             dec_fps,
@@ -1030,7 +1103,10 @@ def main(argv=None):
             snap = pipeline.stats.snapshot()
             _sync_transfer_stats_from_pipeline(snap)
             stats.payload_bytes = len(payload_bytes)
-            final_report = cast(Dict[str, object], dict(stats.finalize(output_size_bytes=len(payload_bytes), ts=now)))
+            final_report = cast(
+                Dict[str, object],
+                dict(stats.finalize(output_size_bytes=len(payload_bytes), ts=now)),
+            )
             _attach_pipeline_metrics(final_report, snap)
             final_report["status"] = "ok"
             final_report["output_path"] = output_path
@@ -1053,7 +1129,9 @@ def main(argv=None):
             if final_report is None:
                 snap = pipeline.stats.snapshot()
                 _sync_transfer_stats_from_pipeline(snap)
-                report = cast(Dict[str, object], dict(stats.finalize(output_size_bytes=0, ts=time.time())))
+                report = cast(
+                    Dict[str, object], dict(stats.finalize(output_size_bytes=0, ts=time.time()))
+                )
                 _attach_pipeline_metrics(report, snap)
                 report["status"] = "aborted"
                 _write_report(args.report_json, report)
@@ -1073,11 +1151,18 @@ def main(argv=None):
                 if manual_mode_now
                 else forced_roi_local
             )
-            if (not replay_mode) and args.detect_mode != "full" and v3_track_roi is None and manual_decode_roi_local is not None:
+            if (
+                (not replay_mode)
+                and args.detect_mode != "full"
+                and v3_track_roi is None
+                and manual_decode_roi_local is not None
+            ):
                 v3_track_roi = manual_decode_roi_local
 
             if args.max_seconds > 0 and now - start > args.max_seconds:
-                final_report = cast(Dict[str, object], dict(stats.finalize(output_size_bytes=0, ts=now)))
+                final_report = cast(
+                    Dict[str, object], dict(stats.finalize(output_size_bytes=0, ts=now))
+                )
                 final_report["status"] = "timeout_max_seconds"
                 _attach_v3_metrics(final_report)
                 _write_report(args.report_json, final_report)
@@ -1085,7 +1170,9 @@ def main(argv=None):
                 return 2
 
             if now - last_good > args.max_idle_seconds:
-                final_report = cast(Dict[str, object], dict(stats.finalize(output_size_bytes=0, ts=now)))
+                final_report = cast(
+                    Dict[str, object], dict(stats.finalize(output_size_bytes=0, ts=now))
+                )
                 final_report["status"] = "timeout_idle"
                 _attach_v3_metrics(final_report)
                 _write_report(args.report_json, final_report)
@@ -1093,8 +1180,9 @@ def main(argv=None):
                 return 2
 
             if threshold is None:
-                threshold = calibrate_threshold(frame, mode=args.threshold)
-                print("calibrated threshold={0}".format(threshold))
+                # Auto threshold - use simple default for basic protocol
+                threshold = 128
+                print("using default threshold={0}".format(threshold))
 
             # manual mode selector on first frame if no roi yet.
             if args.roi_mode == "manual" and forced_roi is None and args.select_region:
@@ -1104,7 +1192,9 @@ def main(argv=None):
                     raise RuntimeError("manual roi selection canceled")
                 forced_roi = _ensure_roi_valid(selected)
                 forced_roi_local = _roi_abs_to_local(forced_roi, capture_region, frame.shape)
-                manual_decode_roi_local = _expand_roi_local(forced_roi_local, frame.shape, args.manual_roi_pad_px)
+                manual_decode_roi_local = _expand_roi_local(
+                    forced_roi_local, frame.shape, args.manual_roi_pad_px
+                )
                 v3_track_roi = manual_decode_roi_local
                 stats.mark_manual_roi(switched=False)
                 if args.roi_profile:
@@ -1112,12 +1202,16 @@ def main(argv=None):
 
             try:
                 t_decode0 = time.perf_counter()
-                if args.protocol in ("v3_1", "auto"):
+                if args.protocol == "basic":
                     last_grid_exc = None
                     if replay_mode:
                         v31_mode = "full"
                     else:
-                        v31_mode = "track" if v3_track_roi is not None else ("full" if v3_mode == "full" else "track")
+                        v31_mode = (
+                            "track"
+                            if v3_track_roi is not None
+                            else ("full" if v3_mode == "full" else "track")
+                        )
                     manual_strict = manual_decode_roi_local is not None and (
                         args.roi_mode == "manual" or stats.manual_roi_applied
                     )
@@ -1127,10 +1221,12 @@ def main(argv=None):
                     for gw, gh in grid_candidates:
                         decode_attempt_total += 1
                         try:
-                            header, payload, meta31 = decode_frame_v31(
+                            header, payload, meta31 = decode_frame_basic(
                                 frame=frame,
                                 detect_mode=v31_mode,
-                                forced_roi=manual_decode_roi_local if manual_strict else v3_track_roi,
+                                forced_roi=manual_decode_roi_local
+                                if manual_strict
+                                else v3_track_roi,
                                 grid_w=gw,
                                 grid_h=gh,
                                 roi_only=roi_only,
@@ -1144,14 +1240,10 @@ def main(argv=None):
                         except Exception as grid_exc:  # noqa: PERF203
                             last_grid_exc = grid_exc
                             # Per-frame recovery: if track path fails, retry the same frame in full mode.
-                            if (
-                                not replay_mode
-                                and not manual_strict
-                                and v31_mode == "track"
-                            ):
+                            if not replay_mode and not manual_strict and v31_mode == "track":
                                 try:
                                     decode_attempt_total += 1
-                                    header, payload, meta31 = decode_frame_v31(
+                                    header, payload, meta31 = decode_frame_basic(
                                         frame=frame,
                                         detect_mode="full",
                                         forced_roi=forced_roi_local,
@@ -1172,7 +1264,7 @@ def main(argv=None):
                     stats.on_locator(confidence=float(meta31.det_confidence), failed=False)
                     frame_v31_meta = meta31
                     last_v31_meta = meta31
-                    protocol_path_used = "v3_1"
+                    protocol_path_used = "basic"
                     last_det_bbox = meta31.det_bbox
                     last_det_confidence = float(meta31.det_confidence)
                     locator_new_fail_reason = meta31.new_fail_reason
@@ -1198,46 +1290,9 @@ def main(argv=None):
                             )
                     if args.detect_mode != "full" and not replay_mode:
                         v3_mode = "track"
-                elif args.protocol == "v3":
-                    decode_attempt_total += 1
-                    manual_strict = manual_decode_roi_local is not None and (
-                        args.roi_mode == "manual" or stats.manual_roi_applied
-                    )
-                    v3_decode_mode = "full" if replay_mode else ("roi" if v3_track_roi is not None else ("full" if v3_mode == "full" else "roi"))
-                    header, payload, meta3 = decode_frame_v3(
-                        frame=frame,
-                        detect_mode=v3_decode_mode,
-                        forced_roi=manual_decode_roi_local if manual_strict else v3_track_roi,
-                        grid_w=grid_w,
-                        grid_h=grid_h,
-                    )
-                    stats.on_locator(confidence=float(meta3.det_confidence), failed=False)
-                    last_v3_meta = meta3
-                    protocol_path_used = "v3"
-                    last_det_bbox = meta3.det_bbox
-                    last_det_confidence = float(meta3.det_confidence)
-                    v3_fail_streak = 0
-                    bx, by, bw, bh = meta3.det_bbox
-                    if not replay_mode:
-                        if manual_strict and manual_decode_roi_local is not None:
-                            v3_track_roi = manual_decode_roi_local
-                        else:
-                            v3_track_roi = _build_track_roi_from_bbox(
-                                (bx, by, bw, bh),
-                                frame.shape,
-                                args.track_margin_px,
-                            )
-                    if args.detect_mode != "full" and not replay_mode:
-                        v3_mode = "track"
                 else:
-                    header, payload, meta = decode_frame(
-                        frame,
-                        block_size=selected_block_size if selected_block_size is not None else block_size_candidates[0],
-                        threshold=threshold,
-                        protocol=args.protocol,
-                        forced_roi=forced_roi,
-                    )
-                    stats.on_locator(confidence=meta.locator_confidence, failed=meta.locator_failed)
+                    # Legacy protocols removed - only basic protocol supported
+                    raise ValueError(f"Protocol '{args.protocol}' no longer supported, use 'basic'")
                 auto_fail_count = 0
                 last_decode_error = None
                 decode_time_sum += max(0.0, time.perf_counter() - t_decode0)
@@ -1252,35 +1307,19 @@ def main(argv=None):
                 )
                 if (
                     not decoded
-                    and args.protocol not in ("v3_1", "v3", "auto")
+                    and False  # Legacy protocol block size auto-selection removed
                     and selected_block_size is None
                     and len(block_size_candidates) > 1
                 ):
-                    for bs in block_size_candidates:
-                        try:
-                            header, payload, meta = decode_frame(
-                                frame,
-                                block_size=bs,
-                                threshold=threshold,
-                                protocol=args.protocol,
-                                forced_roi=forced_roi,
-                            )
-                            selected_block_size = bs
-                            print("auto selected block-size={0}".format(selected_block_size))
-                            stats.on_locator(confidence=meta.locator_confidence, failed=meta.locator_failed)
-                            auto_fail_count = 0
-                            last_decode_error = None
-                            decoded = True
-                            break
-                        except Exception as trial_exc:  # noqa: PERF203
-                            last_exc = trial_exc
+                    # This branch is now unreachable - kept for structure
+                    pass
                 if decoded:
                     auto_fail_count = 0
                     last_decode_error = None
                     pass
                 else:
                     last_decode_error = str(last_exc)
-                    if args.protocol in ("v3_1", "v3", "auto"):
+                    if args.protocol == "basic":
                         v3_fail_streak += 1
                         # Fast recovery: return to full search after a few consecutive misses.
                         if v3_fail_streak >= 3 and not replay_mode:
@@ -1299,12 +1338,18 @@ def main(argv=None):
                     ):
                         manual_attempts += 1
                         stats.mark_manual_select_attempt()
-                        print("auto locator failed, switching to manual selection (attempt {0})".format(manual_attempts))
+                        print(
+                            "auto locator failed, switching to manual selection (attempt {0})".format(
+                                manual_attempts
+                            )
+                        )
                         selected = select_region(get_monitor_region(args.monitor_index))
                         if selected is not None:
                             forced_roi = _ensure_roi_valid(selected)
                             stats.mark_manual_roi(switched=True)
-                            forced_roi_local = _roi_abs_to_local(forced_roi, capture_region, frame.shape)
+                            forced_roi_local = _roi_abs_to_local(
+                                forced_roi, capture_region, frame.shape
+                            )
                             manual_decode_roi_local = _expand_roi_local(
                                 forced_roi_local, frame.shape, args.manual_roi_pad_px
                             )
@@ -1315,77 +1360,80 @@ def main(argv=None):
                     if now >= next_stats_ts:
                         _print_stats(stats.snapshot(ts=now), assembler.missing_count())
                         next_stats_ts = now + max(0.1, args.stats_interval)
-                    debug_written, debug_next_ts, debug_time_sum, debug_time_count = _maybe_dump_debug_snapshot(
-                        now=now,
-                        debug_dir=args.debug_dir,
-                        debug_written=debug_written,
-                        debug_max_frames=args.debug_max_frames,
-                        debug_next_ts=debug_next_ts,
-                        debug_interval=args.debug_interval,
-                        debug_time_sum=debug_time_sum,
-                        debug_time_count=debug_time_count,
-                        threshold=threshold,
-                        dump_kwargs={
-                            "frame_index": frame_index,
-                            "frame": frame,
-                            "forced_roi_local": forced_roi_local,
-                            "forced_roi_abs": forced_roi,
-                            "capture_region": capture_region,
-                            "decode_error": last_decode_error,
-                            "selected_block_size": selected_block_size,
-                            "protocol_path_used": protocol_path_used,
-                            "detect_mode_used": v3_mode,
-                            "track_roi_local": v3_track_roi,
-                            "det_bbox_local": last_det_bbox,
-                            "det_confidence": last_det_confidence,
-                            "decode_attempt_total": decode_attempt_total,
-                            "fallback_hits": fallback_hits,
-                            "manual_strict": (args.roi_mode == "manual" or stats.manual_roi_applied),
-                            "v31_meta": frame_v31_meta,
-                            "grid_w": grid_w,
-                            "grid_h": grid_h,
-                            "locator_confidence_threshold": args.locator_confidence_threshold,
-                        },
+                    debug_written, debug_next_ts, debug_time_sum, debug_time_count = (
+                        _maybe_dump_debug_snapshot(
+                            now=now,
+                            debug_dir=args.debug_dir,
+                            debug_written=debug_written,
+                            debug_max_frames=args.debug_max_frames,
+                            debug_next_ts=debug_next_ts,
+                            debug_interval=args.debug_interval,
+                            debug_time_sum=debug_time_sum,
+                            debug_time_count=debug_time_count,
+                            threshold=threshold,
+                            dump_kwargs={
+                                "frame_index": frame_index,
+                                "frame": frame,
+                                "forced_roi_local": forced_roi_local,
+                                "forced_roi_abs": forced_roi,
+                                "capture_region": capture_region,
+                                "decode_error": last_decode_error,
+                                "selected_block_size": selected_block_size,
+                                "protocol_path_used": protocol_path_used,
+                                "detect_mode_used": v3_mode,
+                                "track_roi_local": v3_track_roi,
+                                "det_bbox_local": last_det_bbox,
+                                "det_confidence": last_det_confidence,
+                                "decode_attempt_total": decode_attempt_total,
+                                "fallback_hits": fallback_hits,
+                                "manual_strict": (
+                                    args.roi_mode == "manual" or stats.manual_roi_applied
+                                ),
+                                "v31_meta": frame_v31_meta,
+                                "grid_w": grid_w,
+                                "grid_h": grid_h,
+                                "locator_confidence_threshold": args.locator_confidence_threshold,
+                            },
+                        )
                     )
                     continue
 
-            debug_written, debug_next_ts, debug_time_sum, debug_time_count = _maybe_dump_debug_snapshot(
-                now=now,
-                debug_dir=args.debug_dir,
-                debug_written=debug_written,
-                debug_max_frames=args.debug_max_frames,
-                debug_next_ts=debug_next_ts,
-                debug_interval=args.debug_interval,
-                debug_time_sum=debug_time_sum,
-                debug_time_count=debug_time_count,
-                threshold=threshold,
-                dump_kwargs={
-                    "frame_index": frame_index,
-                    "frame": frame,
-                    "forced_roi_local": forced_roi_local,
-                    "forced_roi_abs": forced_roi,
-                    "capture_region": capture_region,
-                    "decode_error": last_decode_error,
-                    "selected_block_size": selected_block_size,
-                    "protocol_path_used": protocol_path_used,
-                    "detect_mode_used": v3_mode,
-                    "track_roi_local": v3_track_roi,
-                    "det_bbox_local": last_det_bbox,
-                    "det_confidence": last_det_confidence,
-                    "decode_attempt_total": decode_attempt_total,
-                    "fallback_hits": fallback_hits,
-                    "manual_strict": (args.roi_mode == "manual" or stats.manual_roi_applied),
-                    "v31_meta": frame_v31_meta,
-                    "grid_w": grid_w,
-                    "grid_h": grid_h,
-                    "locator_confidence_threshold": args.locator_confidence_threshold,
-                },
+            debug_written, debug_next_ts, debug_time_sum, debug_time_count = (
+                _maybe_dump_debug_snapshot(
+                    now=now,
+                    debug_dir=args.debug_dir,
+                    debug_written=debug_written,
+                    debug_max_frames=args.debug_max_frames,
+                    debug_next_ts=debug_next_ts,
+                    debug_interval=args.debug_interval,
+                    debug_time_sum=debug_time_sum,
+                    debug_time_count=debug_time_count,
+                    threshold=threshold,
+                    dump_kwargs={
+                        "frame_index": frame_index,
+                        "frame": frame,
+                        "forced_roi_local": forced_roi_local,
+                        "forced_roi_abs": forced_roi,
+                        "capture_region": capture_region,
+                        "decode_error": last_decode_error,
+                        "selected_block_size": selected_block_size,
+                        "protocol_path_used": protocol_path_used,
+                        "detect_mode_used": v3_mode,
+                        "track_roi_local": v3_track_roi,
+                        "det_bbox_local": last_det_bbox,
+                        "det_confidence": last_det_confidence,
+                        "decode_attempt_total": decode_attempt_total,
+                        "fallback_hits": fallback_hits,
+                        "manual_strict": (args.roi_mode == "manual" or stats.manual_roi_applied),
+                        "v31_meta": frame_v31_meta,
+                        "grid_w": grid_w,
+                        "grid_h": grid_h,
+                        "locator_confidence_threshold": args.locator_confidence_threshold,
+                    },
+                )
             )
 
-            if args.protocol in ("v3", "v3_1", "auto"):
-                is_data_frame = int(header.frame_type) == int(V3_FRAME_DATA)
-            else:
-                is_data_frame = int(header.frame_type) == int(FRAME_DATA)
+            is_data_frame = int(header.frame_type) == int(FRAME_DATA)
 
             if not is_data_frame:
                 stats.on_frame(decoded_ok=True, payload_len=0, ts=now)
@@ -1407,38 +1455,40 @@ def main(argv=None):
                 if assembler.manifest is None:
                     continue
                 output_path = restore_payload(payload_bytes, assembler.manifest, args.output_dir)
-                final_report = cast(Dict[str, object], dict(stats.finalize(output_size_bytes=len(payload_bytes), ts=time.time())))
+                final_report = cast(
+                    Dict[str, object],
+                    dict(stats.finalize(output_size_bytes=len(payload_bytes), ts=time.time())),
+                )
                 final_report["status"] = "ok"
                 final_report["output_path"] = output_path
-                if args.protocol in ("v3", "v3_1", "auto"):
-                    _attach_v3_metrics(final_report)
-                    if last_v3_meta is not None:
-                        final_report["protocol_version_used"] = float(last_v3_meta.protocol_version_used)
-                        final_report["det_confidence"] = float(last_v3_meta.det_confidence)
-                        final_report["homography_rmse"] = float(last_v3_meta.homography_rmse)
-                        final_report["rs_corrected_symbols"] = float(last_v3_meta.rs_corrected_symbols)
-                        final_report["crc_ok"] = 1.0 if last_v3_meta.crc_ok else 0.0
-                        final_report["mask_id"] = float(last_v3_meta.mask_id)
-                        final_report["grid_size"] = last_v3_meta.grid_size
-                    if last_v31_meta is not None:
-                        final_report["protocol_version_used"] = float(last_v31_meta.protocol_version_used)
-                        final_report["det_confidence"] = float(last_v31_meta.det_confidence)
-                        final_report["homography_rmse"] = float(last_v31_meta.homography_rmse)
-                        final_report["rs_corrected_symbols"] = float(last_v31_meta.rs_corrected_symbols)
-                        final_report["crc_ok"] = 1.0 if last_v31_meta.crc_ok else 0.0
-                        final_report["mask_id"] = float(last_v31_meta.mask_id)
-                        final_report["grid_size"] = last_v31_meta.grid_size
-                        final_report["locator_engine"] = last_v31_meta.locator_engine
-                        final_report["locator_fail_reason"] = last_v31_meta.fail_reason
-                        final_report["locator_elapsed_ms"] = float(last_v31_meta.elapsed_ms)
-                        final_report["legacy_used"] = 1.0 if last_v31_meta.legacy_used else 0.0
-                        final_report["new_fail_reason"] = last_v31_meta.new_fail_reason
-                        final_report["new_elapsed_ms"] = float(last_v31_meta.new_elapsed_ms)
-                        final_report["legacy_elapsed_ms"] = float(last_v31_meta.legacy_elapsed_ms)
-                    else:
-                        final_report["protocol_version_used"] = 3.0
+                _attach_v3_metrics(final_report)
+                if last_v3_meta is not None:
+                    final_report["protocol_version_used"] = float(last_v3_meta.protocol_version_used)
+                    final_report["det_confidence"] = float(last_v3_meta.det_confidence)
+                    final_report["homography_rmse"] = float(last_v3_meta.homography_rmse)
+                    final_report["rs_corrected_symbols"] = float(last_v3_meta.rs_corrected_symbols)
+                    final_report["crc_ok"] = 1.0 if last_v3_meta.crc_ok else 0.0
+                    final_report["mask_id"] = float(last_v3_meta.mask_id)
+                    final_report["grid_size"] = last_v3_meta.grid_size
+                if last_v31_meta is not None:
+                    final_report["protocol_version_used"] = float(
+                        last_v31_meta.protocol_version_used
+                    )
+                    final_report["det_confidence"] = float(last_v31_meta.det_confidence)
+                    final_report["homography_rmse"] = float(last_v31_meta.homography_rmse)
+                    final_report["rs_corrected_symbols"] = float(last_v31_meta.rs_corrected_symbols)
+                    final_report["crc_ok"] = 1.0 if last_v31_meta.crc_ok else 0.0
+                    final_report["mask_id"] = float(last_v31_meta.mask_id)
+                    final_report["grid_size"] = last_v31_meta.grid_size
+                    final_report["locator_engine"] = last_v31_meta.locator_engine
+                    final_report["locator_fail_reason"] = last_v31_meta.fail_reason
+                    final_report["locator_elapsed_ms"] = float(last_v31_meta.elapsed_ms)
+                    final_report["legacy_used"] = 1.0 if last_v31_meta.legacy_used else 0.0
+                    final_report["new_fail_reason"] = last_v31_meta.new_fail_reason
+                    final_report["new_elapsed_ms"] = float(last_v31_meta.new_elapsed_ms)
+                    final_report["legacy_elapsed_ms"] = float(last_v31_meta.legacy_elapsed_ms)
                 else:
-                    final_report["protocol_version_used"] = float(meta.protocol_version_used)
+                    final_report["protocol_version_used"] = 3.1
                 final_report["roi_mode_used"] = args.roi_mode
                 if forced_roi is not None:
                     final_report["roi"] = {
@@ -1467,7 +1517,9 @@ def main(argv=None):
                 )
                 return 0
 
-        final_report = cast(Dict[str, object], dict(stats.finalize(output_size_bytes=0, ts=time.time())))
+        final_report = cast(
+            Dict[str, object], dict(stats.finalize(output_size_bytes=0, ts=time.time()))
+        )
         final_report["status"] = "source_exhausted"
         _attach_v3_metrics(final_report)
         _write_report(args.report_json, final_report)
@@ -1475,7 +1527,9 @@ def main(argv=None):
         return 1
     finally:
         if final_report is None:
-            report = cast(Dict[str, object], dict(stats.finalize(output_size_bytes=0, ts=time.time())))
+            report = cast(
+                Dict[str, object], dict(stats.finalize(output_size_bytes=0, ts=time.time()))
+            )
             report["status"] = "aborted"
             _attach_v3_metrics(report)
             _write_report(args.report_json, report)

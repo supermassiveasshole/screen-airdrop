@@ -1,13 +1,13 @@
 import pytest
 
-from screen_airdrop.common.protocol_v3 import V3_FRAME_DATA, FrameHeaderV3
-from screen_airdrop.receiver.decoder_v31 import decode_frame_v31
-from screen_airdrop.sender.encoder_v31 import encode_frame_v31
+from screen_airdrop.common.protocol_basic import FRAME_DATA, FrameHeaderBasic
+from screen_airdrop.receiver.decoder_basic import decode_frame_basic
+from screen_airdrop.sender.encoder_basic import encode_frame_basic
 
 
 def _build_frame(payload: bytes = b"locator-engine"):
-    header = FrameHeaderV3.make(
-        frame_type=V3_FRAME_DATA,
+    header = FrameHeaderBasic.make(
+        frame_type=FRAME_DATA,
         session_id=99,
         epoch_id=1,
         frame_id=2,
@@ -15,7 +15,7 @@ def _build_frame(payload: bytes = b"locator-engine"):
         chunk_id=1,
         payload=payload,
     )
-    frame = encode_frame_v31(
+    frame = encode_frame_basic(
         header=header,
         payload=payload,
         width=1920,
@@ -30,7 +30,7 @@ def _build_frame(payload: bytes = b"locator-engine"):
 
 def test_decode_v31_locator_engine_new():
     header, frame = _build_frame(b"engine-new")
-    parsed, restored, meta = decode_frame_v31(frame=frame, locator_engine="new")
+    parsed, restored, meta = decode_frame_basic(frame=frame, locator_engine="new")
     assert parsed.chunk_id == header.chunk_id
     assert restored == b"engine-new"
     assert meta.locator_engine == "new"
@@ -39,7 +39,7 @@ def test_decode_v31_locator_engine_new():
 
 def test_decode_v31_locator_engine_legacy():
     header, frame = _build_frame(b"engine-legacy")
-    parsed, restored, meta = decode_frame_v31(frame=frame, locator_engine="legacy")
+    parsed, restored, meta = decode_frame_basic(frame=frame, locator_engine="legacy")
     assert parsed.chunk_id == header.chunk_id
     assert restored == b"engine-legacy"
     assert meta.locator_engine == "legacy"
@@ -48,7 +48,7 @@ def test_decode_v31_locator_engine_legacy():
 
 def test_decode_v31_locator_engine_auto_fallback_to_legacy():
     header, frame = _build_frame(b"engine-auto-fallback")
-    parsed, restored, meta = decode_frame_v31(
+    parsed, restored, meta = decode_frame_basic(
         frame=frame,
         locator_engine="auto",
         locator_confidence_threshold=1.1,
@@ -62,7 +62,7 @@ def test_decode_v31_locator_engine_auto_fallback_to_legacy():
 
 def test_decode_v31_locator_engine_new_respects_threshold():
     header, frame = _build_frame(b"engine-new-thr")
-    parsed, restored, _meta = decode_frame_v31(
+    parsed, restored, _meta = decode_frame_basic(
         frame=frame,
         locator_engine="new",
         locator_confidence_threshold=1.1,
@@ -73,7 +73,7 @@ def test_decode_v31_locator_engine_new_respects_threshold():
 
 def test_decode_v31_full_mode_ignores_forced_roi():
     header, frame = _build_frame(b"engine-full-ignore-roi")
-    parsed, restored, _meta = decode_frame_v31(
+    parsed, restored, _meta = decode_frame_basic(
         frame=frame,
         detect_mode="full",
         forced_roi=(0, 0, 64, 64),
@@ -86,7 +86,7 @@ def test_decode_v31_full_mode_ignores_forced_roi():
 def test_decode_v31_manual_strict_requires_forced_roi():
     _header, frame = _build_frame(b"engine-manual-strict")
     with pytest.raises(ValueError, match="requires forced_roi"):
-        decode_frame_v31(
+        decode_frame_basic(
             frame=frame,
             detect_mode="track",
             manual_strict=True,

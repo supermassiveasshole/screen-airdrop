@@ -1,4 +1,4 @@
-"""V3.1 visual encoder with absolute layout contract."""
+"""Basic visual encoder with absolute layout contract."""
 
 from __future__ import annotations
 
@@ -8,29 +8,29 @@ from typing import List, Tuple
 import cv2
 import numpy as np
 
-from screen_airdrop.common.layout_v31 import (
+from screen_airdrop.common.layout_basic import (
     DEFAULT_FINDER,
     DEFAULT_GRID_H,
     DEFAULT_GRID_W,
     DEFAULT_GUARD,
     DEFAULT_QUIET,
     FLAG_TIMING_ENABLED,
-    LayoutInfoV31,
+    LayoutInfoBasic,
 )
-from screen_airdrop.common.protocol_v3 import (
-    V3_ECC_LEVELS,
-    V3_ECC_Q,
-    V3_ECC_TO_ID,
-    V3_FORMAT_MAGIC,
-    V3_HEADER_SIZE,
-    FormatInfoV3,
-    FrameHeaderV3,
+from screen_airdrop.common.protocol_basic import (
+    ECC_LEVELS,
+    ECC_Q,
+    ECC_TO_ID,
+    FORMAT_MAGIC,
+    HEADER_SIZE,
+    FormatInfoBasic,
+    FrameHeaderBasic,
     encode_header_and_payload_bits,
 )
 
 
 @dataclass
-class V31Layout:
+class BasicLayout:
     frame_w: int
     frame_h: int
     grid_w: int
@@ -45,7 +45,7 @@ class V31Layout:
     data_coords: List[Tuple[int, int]]
     format_coords: List[Tuple[int, int]]
     layout_coords: List[Tuple[int, int]]
-    layout_info: LayoutInfoV31
+    layout_info: LayoutInfoBasic
 
 
 def _mask_bit(mask_id: int, x: int, y: int) -> int:
@@ -66,12 +66,12 @@ def _mask_bit(mask_id: int, x: int, y: int) -> int:
     return (((x + y) % 2) + ((x * y) % 3)) & 1
 
 
-def build_layout_v31(
+def build_layout_basic(
     grid_w: int = DEFAULT_GRID_W,
     grid_h: int = DEFAULT_GRID_H,
     guard_band: int = DEFAULT_GUARD,
     corner_size: int = DEFAULT_FINDER,
-) -> V31Layout:
+) -> BasicLayout:
     q = int(DEFAULT_QUIET)
     f = max(7, int(corner_size))
     if f % 2 == 0:
@@ -80,7 +80,7 @@ def build_layout_v31(
     gx = int(grid_w)
     gy = int(grid_h)
 
-    info = LayoutInfoV31(
+    info = LayoutInfoBasic(
         quiet=q,
         finder=f,
         guard=guard,
@@ -118,7 +118,7 @@ def build_layout_v31(
     for y in range(q + f, fh - q - f):
         layout_coords.append((lx, y))
 
-    return V31Layout(
+    return BasicLayout(
         frame_w=fw,
         frame_h=fh,
         grid_w=gx,
@@ -144,7 +144,7 @@ def _draw_finder(mat: np.ndarray, left: int, top: int, size: int) -> None:
     mat[top + 3 : top + size - 3, left + 3 : left + size - 3] = 0
 
 
-def _paint_static_layers(mat: np.ndarray, layout: V31Layout) -> None:
+def _paint_static_layers(mat: np.ndarray, layout: BasicLayout) -> None:
     q = layout.quiet
     f = layout.finder
     h, w = mat.shape
@@ -172,14 +172,16 @@ def _paint_static_layers(mat: np.ndarray, layout: V31Layout) -> None:
         mat[y, tx1] = 1 if y % 2 == 0 else 0
 
 
-def _write_format(mat: np.ndarray, layout: V31Layout, frame_type: int, mask_id: int, ecc_level: str) -> None:
+def _write_format(
+    mat: np.ndarray, layout: BasicLayout, frame_type: int, mask_id: int, ecc_level: str
+) -> None:
     reserved = ((layout.guard_band & 0xFF) << 8) | (layout.finder & 0xFF)
-    fmt = FormatInfoV3(
-        magic=V3_FORMAT_MAGIC,
+    fmt = FormatInfoBasic(
+        magic=FORMAT_MAGIC,
         version=31,
         frame_type=frame_type,
         mask_id=mask_id,
-        ecc_id=V3_ECC_TO_ID[ecc_level],
+        ecc_id=ECC_TO_ID[ecc_level],
         reserved=reserved,
     )
     bits = []
@@ -193,7 +195,7 @@ def _write_format(mat: np.ndarray, layout: V31Layout, frame_type: int, mask_id: 
         mat[y, x] = repeated[i]
 
 
-def _write_layout_info(mat: np.ndarray, layout: V31Layout) -> None:
+def _write_layout_info(mat: np.ndarray, layout: BasicLayout) -> None:
     bits = []
     for b in layout.layout_info.pack():
         for i in range(7, -1, -1):
@@ -219,7 +221,9 @@ def _render_modules(
     scale = max(1, min(avail_w // mw, avail_h // mh))
     sym_w = mw * scale
     sym_h = mh * scale
-    symbol = cv2.resize((modules * 255).astype(np.uint8), (sym_w, sym_h), interpolation=cv2.INTER_NEAREST)
+    symbol = cv2.resize(
+        (modules * 255).astype(np.uint8), (sym_w, sym_h), interpolation=cv2.INTER_NEAREST
+    )
     frame = np.full((height, width), 255 if outer_padding_white else 0, dtype=np.uint8)
     ox = pad + (avail_w - sym_w) // 2
     oy = pad + (avail_h - sym_h) // 2
@@ -227,32 +231,36 @@ def _render_modules(
     return np.dstack([frame, frame, frame])
 
 
-def frame_capacity_bytes_v31(
+def frame_capacity_bytes_basic(
     grid_w: int = DEFAULT_GRID_W,
     grid_h: int = DEFAULT_GRID_H,
-    ecc_level: str = V3_ECC_Q,
+    ecc_level: str = ECC_Q,
     guard_band: int = DEFAULT_GUARD,
     corner_size: int = DEFAULT_FINDER,
 ) -> int:
-    if ecc_level not in V3_ECC_LEVELS:
+    if ecc_level not in ECC_LEVELS:
         raise ValueError("invalid ecc level")
-    layout = build_layout_v31(grid_w=grid_w, grid_h=grid_h, guard_band=guard_band, corner_size=corner_size)
+    layout = build_layout_basic(
+        grid_w=grid_w, grid_h=grid_h, guard_band=guard_band, corner_size=corner_size
+    )
     rep = {"L": 1, "M": 2, "Q": 3, "H": 4}[ecc_level]
     total_raw_bytes = (len(layout.data_coords) // rep) // 8
-    return max(0, total_raw_bytes - V3_HEADER_SIZE - 2)
+    return max(0, total_raw_bytes - HEADER_SIZE - 2)
 
 
-def build_symbol_modules_v31(
-    header: FrameHeaderV3,
+def build_symbol_modules_basic(
+    header: FrameHeaderBasic,
     payload: bytes,
     grid_w: int = DEFAULT_GRID_W,
     grid_h: int = DEFAULT_GRID_H,
-    ecc_level: str = V3_ECC_Q,
+    ecc_level: str = ECC_Q,
     guard_band: int = DEFAULT_GUARD,
     corner_size: int = DEFAULT_FINDER,
     forced_mask: int = 3,
 ) -> np.ndarray:
-    layout = build_layout_v31(grid_w=grid_w, grid_h=grid_h, guard_band=guard_band, corner_size=corner_size)
+    layout = build_layout_basic(
+        grid_w=grid_w, grid_h=grid_h, guard_band=guard_band, corner_size=corner_size
+    )
     mat = np.zeros((layout.frame_h, layout.frame_w), dtype=np.uint8)
     _paint_static_layers(mat, layout)
 
@@ -274,21 +282,21 @@ def build_symbol_modules_v31(
     return mat
 
 
-def encode_frame_v31(
-    header: FrameHeaderV3,
+def encode_frame_basic(
+    header: FrameHeaderBasic,
     payload: bytes,
     width: int,
     height: int,
     grid_w: int = DEFAULT_GRID_W,
     grid_h: int = DEFAULT_GRID_H,
-    ecc_level: str = V3_ECC_Q,
+    ecc_level: str = ECC_Q,
     guard_band: int = DEFAULT_GUARD,
     corner_size: int = DEFAULT_FINDER,
     forced_mask: int = 3,
     outer_padding_px: int = 0,
     outer_padding_white: bool = False,
 ) -> np.ndarray:
-    modules = build_symbol_modules_v31(
+    modules = build_symbol_modules_basic(
         header=header,
         payload=payload,
         grid_w=grid_w,

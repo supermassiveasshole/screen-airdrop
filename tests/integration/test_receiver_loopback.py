@@ -25,17 +25,18 @@ def test_replay_loopback_with_report(tmp_path: Path):
     (src / "a.txt").write_text("hello loopback")
     (src / "b.bin").write_bytes(b"\x01\x02\x03" * 1000)
 
-    encoded = build_encoded_frames(
+    encoded_gen = build_encoded_frames(
         input_path=str(src),
         block_size=6,
         chunk_size=2048,
         sync_frames=10,
         epochs=2,
     )
+    encoded = list(encoded_gen)
 
     frame_dir = tmp_path / "frames"
     frame_dir.mkdir()
-    for i, item in enumerate(encoded["frames"]):
+    for i, item in enumerate(encoded):
         np.save(frame_dir / "{0:06d}.npy".format(i), item["image"])
 
     out_dir = tmp_path / "out"

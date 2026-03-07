@@ -27,17 +27,18 @@ def test_real_data_replay(dataset: str, block_size: int, tmp_path: Path):
     fixture_root = Path(__file__).resolve().parents[1] / "fixtures" / "real_data"
     src = fixture_root / dataset
 
-    encoded = build_encoded_frames(
+    encoded_gen = build_encoded_frames(
         input_path=str(src),
         block_size=block_size,
         chunk_size=1024 if block_size == 8 else 2048,
         sync_frames=8,
         epochs=2,
     )
+    encoded = list(encoded_gen)
 
     frame_dir = tmp_path / "frames"
     frame_dir.mkdir()
-    for i, item in enumerate(encoded["frames"]):
+    for i, item in enumerate(encoded):
         np.save(frame_dir / "{0:06d}.npy".format(i), item["image"])
 
     out_dir = tmp_path / "out"

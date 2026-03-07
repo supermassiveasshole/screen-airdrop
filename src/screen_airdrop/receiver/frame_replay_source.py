@@ -33,7 +33,9 @@ class FrameReplaySource(object):
                 try:
                     import cv2  # pylint: disable=import-outside-toplevel
                 except Exception as exc:  # pragma: no cover
-                    raise RuntimeError("opencv-python required to read png replay frames: {0}".format(exc))
+                    raise RuntimeError(
+                        "opencv-python required to read png replay frames: {0}".format(exc)
+                    )
                 frame = cv2.imread(full, cv2.IMREAD_COLOR)
                 if frame is None:
                     raise RuntimeError("failed to read frame: {0}".format(full))

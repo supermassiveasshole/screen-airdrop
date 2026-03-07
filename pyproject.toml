@@ -51,6 +51,10 @@ line-length = 100
 src = ["src", "tests", "tools"]
 force-exclude = true
 exclude = [
+  "**/node_modules",
+  "**/__pycache__",
+  "**/.*",
+  ".claude",
   ".git",
   ".hg",
   ".mypy_cache",
@@ -61,14 +65,37 @@ exclude = [
   ".venv",
   ".vscode",
   "__pypackages__",
-  "__pycache__",
+  "bench/results",
   "build",
+  "docker",
+  "docs",
   "dist",
   "node_modules",
+  "recovered",
   "site-packages",
   "venv",
   ".DS_Store",
   "debug"
+]
+
+[tool.pyright]
+include = ["src", "tests", "tools"]
+exclude = [
+  "**/node_modules",
+  "**/__pycache__",
+  "**/.*",
+  ".claude",
+  ".git",
+  ".pytest_cache",
+  ".ruff_cache",
+  ".venv",
+  "bench/results",
+  "build",
+  "debug",
+  "dist",
+  "docker",
+  "docs",
+  "recovered",
 ]
 
 [tool.ruff.per-file-target-version]

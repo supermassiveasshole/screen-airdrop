@@ -129,7 +129,9 @@ def generate_products(n: int, seed: int = 11) -> List[Product]:
     return out
 
 
-def generate_orders(users: List[User], products: List[Product], n: int, seed: int = 23) -> List[Order]:
+def generate_orders(
+    users: List[User], products: List[Product], n: int, seed: int = 23
+) -> List[Order]:
     random.seed(seed)
     out = []
     now = time.time()
@@ -259,7 +261,10 @@ def small_demo() -> Dict[str, object]:
         store.add_order(o)
 
     engine = PricingEngine(tax_rate=0.08)
-    priced = [engine.total(o.subtotal_cents, coupon="OFF10" if i % 3 == 0 else None) for i, o in enumerate(orders)]
+    priced = [
+        engine.total(o.subtotal_cents, coupon="OFF10" if i % 3 == 0 else None)
+        for i, o in enumerate(orders)
+    ]
     avg = sum(priced) / len(priced)
 
     va = make_random_vector(128, seed=1)

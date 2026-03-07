@@ -6,6 +6,7 @@ import gzip
 import hashlib
 import io
 import os
+import sys
 import tarfile
 
 from screen_airdrop.common.errors import E3001, E3002, ScreenAirdropError
@@ -31,7 +32,10 @@ def restore_payload(payload: bytes, manifest: Manifest, output_dir: str) -> str:
 
     try:
         with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:") as tf:
-            tf.extractall(path=output_dir)
+            if sys.version_info >= (3, 12):
+                tf.extractall(path=output_dir, filter="fully_trusted")
+            else:
+                tf.extractall(path=output_dir)
     except Exception as exc:
         raise ScreenAirdropError(E3002, "tar extract failed: {0}".format(exc))
 

@@ -7,12 +7,12 @@ import hashlib
 import io
 import os
 import tarfile
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Tuple
 
 from .errors import E1001, E1002, E1003, ScreenAirdropError
 from .manifest import Manifest
-from .protocol import PROTOCOL_VERSION
+from .protocol_basic import PROTOCOL_VERSION
 
 
 def ensure_input_exists(path: str) -> None:
@@ -123,9 +123,9 @@ def build_manifest(
 ) -> Manifest:
     entries = build_entries(input_path)
     return Manifest(
-        protocol_version=PROTOCOL_VERSION,
+        protocol_version=int(PROTOCOL_VERSION),
         session_id=session_id,
-        created_at=datetime.utcnow().isoformat() + "Z",
+        created_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         input_root_name=os.path.basename(os.path.abspath(input_path)),
         pack="tar",
         compress=compress_method,

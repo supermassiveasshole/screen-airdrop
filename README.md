@@ -18,70 +18,54 @@ Quickstart (local modern environment):
 
 ```bash
 uv sync --group dev
-uv run screen-airdrop-sender ./path/to/input --window-name "screen-airdrop"
-uv run screen-airdrop-receiver --source screen --window-title "Remote Desktop" --output-dir ./recovered
+uv run screen-airdrop-sender ./path/to/input --window-name “screen-airdrop”
+uv run screen-airdrop-receiver --source screen --window-title “Remote Desktop” --output-dir ./recovered
 ```
 
-V3.1 four-corner fixed-grid protocol (default):
+Basic protocol (default):
 
 ```bash
+# Sender with custom parameters
 uv run screen-airdrop-sender ./path/to/input \
-  --protocol v3_1 \
+  --fps 12 \
+  --chunk-size 2048 \
+  --compress gzip \
   --ecc-level Q \
   --module-grid 160x96 \
-  --guard-band-modules 2 \
-  --corner-size-modules 9
+  --window-name “screen-airdrop”
 
+# Receiver with custom parameters
 uv run screen-airdrop-receiver \
   --source screen \
-  --protocol v3_1 \
-  --detect-mode track \
-  --locator-engine auto \
-  --locator-confidence-threshold 0.55 \
-  --track-margin-px 96 \
+  --window-title “Remote Desktop” \
+  --module-grid 160x96 \
   --output-dir ./recovered \
   --report-json ./recovered/receiver_report.json
+
+# Receiver with manual ROI
+uv run screen-airdrop-receiver \
+  --source screen \
+  --roi 100,100,800,600 \
+  --output-dir ./recovered
+
+# Receiver with interactive ROI selection
+uv run screen-airdrop-receiver \
+  --source screen \
+  --roi-interactive \
+  --output-dir ./recovered
 ```
 
 关键说明：
 
-* `v3_1` 主链使用“四角定位 + 固定网格切分 + 模块中心采样”。
-* `--locator-engine` 支持 `new|legacy|auto`，默认 `auto`，行为是先 `new`，失败或置信度不足再回退 `legacy`。
-* 接收端默认 `track`：首帧全局定位，成功后局部跟踪，连续失败自动回全局。
-* `v3_1` 路径不再回退到旧 `v3` 协议解码。
-
-V2 auto locator + manual ROI fallback (recommended):
-
-```bash
-uv run screen-airdrop-sender ./path/to/input --protocol v2 --quiet-zone-px 48
-uv run screen-airdrop-receiver \
-  --source screen \
-  --protocol v2 \
-  --roi-mode auto_then_manual \
-  --select-region \
-  --roi-profile ~/.screen-airdrop-roi.json \
-  --output-dir ./recovered \
-  --report-json ./recovered/receiver_report.json
-```
-
-Manual-only ROI mode:
-
-```bash
-uv run screen-airdrop-receiver \
-  --source screen \
-  --protocol v2 \
-  --roi-mode manual \
-  --select-region
-
-# Manual ROI tips:
-# 1) You can select either the full white locator frame OR payload area only.
-# 2) Enter confirm / R reselect / Esc cancel.
-```
+* 当前协议为 `basic`（四角定位 + 固定网格切分 + 模块中心采样）
+* 对外命名统一为 `basic`；报告里的 `protocol_version_used = 3.1` 表示帧格式版本，不再作为协议名暴露
+* 接收端自动进行全局定位，成功后局部跟踪，连续失败自动回全局
+* 未来将支持 `fountain`（喷泉码）协议
 
 Legacy sender (Python 3.7.6 server):
 
 ```bash
-screen-airdrop-sender-legacy /path/to/input --window-name "screen-airdrop"
+screen-airdrop-sender-legacy /path/to/input --window-name “screen-airdrop”
 ```
 
 Packaging:
@@ -104,10 +88,6 @@ uv run python bench/summarize.py
 
 ```bash
 uv run python bench/run_benchmark.py --mode replay --repeats 3
-
-# 指定协议做对比
-uv run python bench/run_benchmark.py --mode replay --protocol v3_1 --repeats 3
-uv run python bench/run_benchmark.py --mode replay --protocol v3 --repeats 3
 ```
 
 输出文件：
@@ -124,9 +104,7 @@ uv run python bench/run_benchmark.py --mode replay --protocol v3 --repeats 3
 * `end_to_end_kibps`: 从开始到恢复完成的端到端吞吐（单位 KiB/s）
 * `bad_frame_rate`: 坏帧占比
 * `recovery_latency_s`: 从接收到首个数据帧到恢复完成耗时
-* `protocol_path_used`: 本次主用解码路径（`v3_1` 或 `v3`）
 * `decode_attempts_per_frame`: 平均每帧解码尝试次数（越低越快）
-* `fallback_ratio`: 回退到旧 `v3` 的比例
 * `homography_stability`: 连续帧检测框抖动均值（越低越稳）
 
 为什么优先看 `goodput_kibps`：
@@ -394,20 +372,25 @@ screen-airdrop = **Sender + Receiver + Protocol**
 
 ### 10.1 发送端
 
-* `--chunk-size` 默认 `16384`
-* `--block-size` 默认 `6`
 * `--fps` 默认 `12`
+* `--chunk-size` 默认 `2048`
 * `--compress` 默认 `gzip`
-* `--sync-frames` 默认 `30`
+* `--ecc-level` 默认 `Q`（可选：L/M/Q/H）
+* `--module-grid` 默认 `160x96`
+* `--window-name` 默认 `screen-airdrop`
 * `--max-epochs` 默认 `0`（0 表示无限循环）
+* `--protocol` 默认 `basic`（未来支持 `fountain`）
 
 ### 10.2 接收端
 
-* `--window-title` 必填（或 `--roi`）
-* `--block-size` 默认 `auto`
-* `--threshold` 默认 `auto`
+* `--source` 默认 `screen`（可选：replay）
+* `--window-title` 必填（screen 模式）
+* `--module-grid` 默认 `160x96`
+* `--roi` 可选手动 ROI（格式：x,y,w,h）
+* `--roi-interactive` 可选交互式 ROI 选择
 * `--max-idle-seconds` 默认 `30`
-* `--output-dir` 默认当前目录
+* `--output-dir` 默认 `./recovered`
+* `--protocol` 默认 `basic`
 
 ---
 
@@ -416,20 +399,22 @@ screen-airdrop = **Sender + Receiver + Protocol**
 ### 11.1 sender
 
 ```bash
-screen-airdrop sender /path/to/input \
+uv run screen-airdrop-sender /path/to/input \
+  --fps 12 \
+  --chunk-size 2048 \
   --compress gzip \
-  --chunk-size 16384 \
-  --block-size 6 \
-  --fps 12
+  --ecc-level Q \
+  --module-grid 160x96
 ```
 
 ### 11.2 receiver
 
 ```bash
-screen-airdrop receiver \
+uv run screen-airdrop-receiver \
+  --source screen \
   --window-title "Remote Desktop" \
-  --output-dir ./recovered \
-  --block-size auto
+  --module-grid 160x96 \
+  --output-dir ./recovered
 ```
 
 ### 11.3 运行输出（必须）

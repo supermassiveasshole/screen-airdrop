@@ -68,12 +68,18 @@ class TransferStats(object):
         valid_fps = self.valid_frames / elapsed
         # NOTE: throughput is computed in KiB/s (bytes / 1024 / s).
         goodput_kibps = (self.payload_bytes / elapsed) / 1024.0
-        bad_rate = float(self.bad_frames) / float(self.total_frames) if self.total_frames > 0 else 0.0
+        bad_rate = (
+            float(self.bad_frames) / float(self.total_frames) if self.total_frames > 0 else 0.0
+        )
         recovery_latency = (
             max(0.0, now - self.first_data_ts) if self.first_data_ts is not None else 0.0
         )
-        locator_fail_rate = float(self.locator_fail) / float(self.locator_total) if self.locator_total > 0 else 0.0
-        locator_conf = self.locator_conf_sum / float(self.locator_total) if self.locator_total > 0 else 0.0
+        locator_fail_rate = (
+            float(self.locator_fail) / float(self.locator_total) if self.locator_total > 0 else 0.0
+        )
+        locator_conf = (
+            self.locator_conf_sum / float(self.locator_total) if self.locator_total > 0 else 0.0
+        )
 
         snap = {
             "raw_frame_rate_fps": raw_fps,
@@ -99,7 +105,9 @@ class TransferStats(object):
         snap = self.snapshot(ts=now)
 
         total_elapsed = self._elapsed(now)
-        end_to_end_kibps = (float(output_size_bytes) / total_elapsed) / 1024.0 if output_size_bytes > 0 else 0.0
+        end_to_end_kibps = (
+            (float(output_size_bytes) / total_elapsed) / 1024.0 if output_size_bytes > 0 else 0.0
+        )
 
         report = dict(snap)
         report["start_ts"] = self.start_ts

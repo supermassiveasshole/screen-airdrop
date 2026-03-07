@@ -8,23 +8,20 @@ import time
 from unittest.mock import MagicMock, patch
 
 import numpy as np
-import pytest
 
+from screen_airdrop.common.protocol_basic import FRAME_DATA
 from screen_airdrop.receiver.assembler import ChunkAssembler
 from screen_airdrop.receiver.pipeline import (
     AssemblerThread,
-    CaptureThread,
     DecodeResult,
     DecodeWorker,
     PipelineStats,
-    ReceiverPipeline,
 )
-from screen_airdrop.common.protocol_v3 import V3_FRAME_DATA
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_fake_capture(frames):
     """Build a mock ScreenCapture that yields numpy arrays."""
@@ -44,6 +41,7 @@ def _make_black_frame(h=100, w=100):
 # ---------------------------------------------------------------------------
 # PipelineStats
 # ---------------------------------------------------------------------------
+
 
 class TestPipelineStats:
     def test_snapshot_returns_copy(self):
@@ -79,6 +77,7 @@ class TestPipelineStats:
 # ---------------------------------------------------------------------------
 # CaptureThread – queue-full drop behaviour
 # ---------------------------------------------------------------------------
+
 
 class TestCaptureThreadQueueDrop:
     def test_drops_oldest_when_full(self):
@@ -120,6 +119,7 @@ class TestCaptureThreadQueueDrop:
 # AssemblerThread – concurrent results, completion signalling
 # ---------------------------------------------------------------------------
 
+
 class TestAssemblerThread:
     def _make_result(self, chunk_id, payload=None):
         meta = MagicMock()
@@ -127,7 +127,7 @@ class TestAssemblerThread:
             chunk_id=chunk_id,
             payload=payload or b"\x00" * 8,
             frame_id=chunk_id,
-            frame_type=int(V3_FRAME_DATA),
+            frame_type=int(FRAME_DATA),
             meta=meta,
         )
 
@@ -236,6 +236,7 @@ class TestAssemblerThread:
 # ChunkAssembler O(1) paths
 # ---------------------------------------------------------------------------
 
+
 class TestChunkAssemblerO1:
     def test_complete_o1(self):
         from screen_airdrop.common.manifest import Manifest
@@ -287,14 +288,17 @@ class TestDecodeWorker:
 
         calls = []
 
-        def _fake_decode_frame_v31(**kwargs):
+        def _fake_decode_frame_basic(**kwargs):
             calls.append(kwargs)
             stop.set()
-            header = MagicMock(chunk_id=1, frame_id=1, frame_type=V3_FRAME_DATA)
+            header = MagicMock(chunk_id=1, frame_id=1, frame_type=FRAME_DATA)
             meta = MagicMock(det_bbox=(20, 10, 60, 40))
             return header, b"ok", meta
 
-        with patch("screen_airdrop.receiver.pipeline.decode_frame_v31", side_effect=_fake_decode_frame_v31):
+        with patch(
+            "screen_airdrop.receiver.pipeline.decode_frame_basic",
+            side_effect=_fake_decode_frame_basic,
+        ):
             worker = DecodeWorker(
                 worker_id=0,
                 frame_queue=fq,
@@ -320,14 +324,17 @@ class TestDecodeWorker:
         fq.put(_make_black_frame(100, 100))
         rq.put(object())  # pre-fill to force Full on put
 
-        def _fake_decode_frame_v31(**kwargs):
+        def _fake_decode_frame_basic(**kwargs):
             _ = kwargs
             stop.set()
-            header = MagicMock(chunk_id=1, frame_id=1, frame_type=V3_FRAME_DATA)
+            header = MagicMock(chunk_id=1, frame_id=1, frame_type=FRAME_DATA)
             meta = MagicMock(det_bbox=(10, 10, 40, 40))
             return header, b"ok", meta
 
-        with patch("screen_airdrop.receiver.pipeline.decode_frame_v31", side_effect=_fake_decode_frame_v31):
+        with patch(
+            "screen_airdrop.receiver.pipeline.decode_frame_basic",
+            side_effect=_fake_decode_frame_basic,
+        ):
             worker = DecodeWorker(
                 worker_id=0,
                 frame_queue=fq,
@@ -348,12 +355,15 @@ class TestDecodeWorker:
         stats = PipelineStats()
         fq.put(_make_black_frame(100, 100))
 
-        def _fake_decode_frame_v31(**kwargs):
+        def _fake_decode_frame_basic(**kwargs):
             _ = kwargs
             stop.set()
             raise ValueError("decode failed")
 
-        with patch("screen_airdrop.receiver.pipeline.decode_frame_v31", side_effect=_fake_decode_frame_v31):
+        with patch(
+            "screen_airdrop.receiver.pipeline.decode_frame_basic",
+            side_effect=_fake_decode_frame_basic,
+        ):
             worker = DecodeWorker(
                 worker_id=0,
                 frame_queue=fq,

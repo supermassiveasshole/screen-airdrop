@@ -7,14 +7,14 @@ import queue
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Union
 
 import numpy as np
 
-from screen_airdrop.common.protocol_v3 import V3_DEFAULT_GRID_H, V3_DEFAULT_GRID_W, V3_FRAME_DATA
+from screen_airdrop.common.protocol_basic import DEFAULT_GRID_H, DEFAULT_GRID_W, FRAME_DATA
 from screen_airdrop.receiver.assembler import ChunkAssembler
 from screen_airdrop.receiver.capture_mss import compute_frame_diff, screenshot_to_bgr
-from screen_airdrop.receiver.decoder_v31 import DecodeMetaV31, decode_frame_v31
+from screen_airdrop.receiver.decoder_basic import DecodeMetaBasic, decode_frame_basic
 
 
 @dataclass
@@ -23,7 +23,7 @@ class DecodeResult:
     payload: bytes
     frame_id: int
     frame_type: int
-    meta: DecodeMetaV31
+    meta: DecodeMetaBasic
 
 
 @dataclass
@@ -45,7 +45,7 @@ class PipelineStats:
     capture_dedup_ops: int = 0
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
-    def snapshot(self) -> Dict[str, int]:
+    def snapshot(self) -> Dict[str, Union[int, float]]:
         with self._lock:
             return {
                 "captured": self.captured,
@@ -175,8 +175,8 @@ class DecodeWorker(threading.Thread):
         result_queue: queue.Queue,
         stop_event: threading.Event,
         stats: PipelineStats,
-        grid_w: int = V3_DEFAULT_GRID_W,
-        grid_h: int = V3_DEFAULT_GRID_H,
+        grid_w: int = DEFAULT_GRID_W,
+        grid_h: int = DEFAULT_GRID_H,
         guard_band: int = 2,
         corner_size: int = 9,
         locator_engine: str = "auto",
@@ -216,7 +216,7 @@ class DecodeWorker(threading.Thread):
             try:
                 search_roi = self._track_roi
                 detect_mode = "track" if search_roi is not None else "full"
-                header, payload, meta = decode_frame_v31(
+                header, payload, meta = decode_frame_basic(
                     frame=frame,
                     detect_mode=detect_mode,
                     forced_roi=search_roi,
@@ -292,7 +292,7 @@ class AssemblerThread(threading.Thread):
             except queue.Empty:
                 continue
 
-            if result.frame_type == V3_FRAME_DATA:
+            if result.frame_type == FRAME_DATA:
                 if result.chunk_id > 0:
                     is_new_chunk = result.chunk_id not in self._assembler.chunks
                     self._assembler.add(result.chunk_id, result.payload)
@@ -330,8 +330,8 @@ class ReceiverPipeline:
         frame_diff_threshold: float = 0.015,
         frame_queue_size: int = 32,
         result_queue_size: int = 256,
-        grid_w: int = V3_DEFAULT_GRID_W,
-        grid_h: int = V3_DEFAULT_GRID_H,
+        grid_w: int = DEFAULT_GRID_W,
+        grid_h: int = DEFAULT_GRID_H,
         guard_band: int = 2,
         corner_size: int = 9,
         locator_engine: str = "auto",
@@ -408,4 +408,6 @@ class ReceiverPipeline:
         """Raise first worker error if any."""
         for t in [self._capture_thread, self._assembler_thread] + self._decode_workers:
             if getattr(t, "error", None) is not None:
-                raise RuntimeError("pipeline thread {0} failed: {1}".format(t.name, t.error)) from t.error
+                raise RuntimeError(
+                    "pipeline thread {0} failed: {1}".format(t.name, t.error)
+                ) from t.error
