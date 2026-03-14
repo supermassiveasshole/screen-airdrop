@@ -34,8 +34,10 @@ uv run screen-airdrop-sender ./path/to/input --window-name "screen-airdrop"
 # Run receiver
 uv run screen-airdrop-receiver --source screen --window-title "Remote Desktop" --output-dir ./recovered
 
-# Benchmark (quick replay mode)
-uv run python bench/run_benchmark.py --mode replay --quick
+# Benchmark
+uv run python bench/compare_protocols.py --protocol all --ecc Q --payload-mode fixed --payload-size 500
+uv run python bench/compare_decode_real.py --protocol all --iterations 15
+uv run python bench/compare_end_to_end.py --mode replay --protocol all --ecc Q --payload-mode fixed --payload-size 500
 uv run python bench/summarize.py
 
 # Build offline wheelhouse and CentOS 7 onefile sender

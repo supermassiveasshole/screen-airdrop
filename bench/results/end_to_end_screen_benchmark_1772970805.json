@@ -1,0 +1,40 @@
+[
+  {
+    "benchmark_kind": "end_to_end_screen_runbook",
+    "protocol": "basic",
+    "config": {
+      "protocol": "basic",
+      "grid_w": 160,
+      "grid_h": 96
+    },
+    "ecc_level": "Q",
+    "payload_mode": "max",
+    "payload_bytes": 536,
+    "fps": 12,
+    "capture_fps": 30,
+    "benchmark_seconds": 30,
+    "stats_interval": 1.0,
+    "benchmark_goal": "rate_only",
+    "sender_command": "uv run screen-airdrop-sender /Users/waldron/Code/screen-airdrop/tests/fixtures/real_data/regular_pdf --protocol basic --module-grid 160x96 --ecc-level Q --fps 12 --chunk-size 536 --stats-interval 1.0",
+    "receiver_command": "uv run screen-airdrop-receiver --source screen --protocol basic --module-grid 160x96 --roi-interactive --capture-fps 30 --stats-interval 1.0 --max-seconds 30 --output-dir ./recovered_basic_Q_max"
+  },
+  {
+    "benchmark_kind": "end_to_end_screen_runbook",
+    "protocol": "compact",
+    "config": {
+      "protocol": "compact",
+      "grid_w": 160,
+      "grid_h": 96
+    },
+    "ecc_level": "Q",
+    "payload_mode": "max",
+    "payload_bytes": 536,
+    "fps": 12,
+    "capture_fps": 30,
+    "benchmark_seconds": 30,
+    "stats_interval": 1.0,
+    "benchmark_goal": "rate_only",
+    "sender_command": "uv run screen-airdrop-sender /Users/waldron/Code/screen-airdrop/tests/fixtures/real_data/regular_pdf --protocol compact --module-grid 160x96 --ecc-level Q --fps 12 --chunk-size 536 --stats-interval 1.0",
+    "receiver_command": "uv run screen-airdrop-receiver --source screen --protocol compact --module-grid 160x96 --roi-interactive --capture-fps 30 --stats-interval 1.0 --max-seconds 30 --output-dir ./recovered_compact_Q_max"
+  }
+]

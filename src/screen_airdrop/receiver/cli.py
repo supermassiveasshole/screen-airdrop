@@ -15,7 +15,8 @@ from screen_airdrop.common.protocol_basic import FRAME_DATA
 from screen_airdrop.receiver.assembler import ChunkAssembler
 from screen_airdrop.receiver.capture_mss import ScreenCapture, get_monitor_region
 from screen_airdrop.receiver.decoder_basic import decode_frame_basic
-from screen_airdrop.receiver.detector_basic import detect_symbol_bbox
+from screen_airdrop.receiver.decoder_compact import decode_frame_compact
+from screen_airdrop.receiver.detector_basic import _bbox_from_non_black, detect_symbol_bbox
 from screen_airdrop.receiver.frame_replay_source import FrameReplaySource
 from screen_airdrop.receiver.locator_basic import LocateError as LocateErrorV31
 from screen_airdrop.receiver.locator_basic import LocatorConfig, locate_frame
@@ -46,6 +47,12 @@ def _parse_module_grid(raw: str) -> Tuple[int, int]:
     return gw, gh
 
 
+def _protocol_geometry(protocol: str) -> Tuple[int, int]:
+    if protocol == "compact":
+        return (1, 7)
+    return (2, 9)
+
+
 def _write_report(path: Optional[str], report: dict) -> None:
     if not path:
         return
@@ -73,7 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
     # Protocol and grid configuration (information/robustness parameters)
     parser.add_argument(
         "--protocol",
-        choices=["basic"],
+        choices=["basic", "compact"],
         default="basic",
         help="protocol name",
     )
@@ -327,7 +334,7 @@ def _should_use_pipeline(
 ) -> bool:
     return (
         source == "screen"
-        and protocol == "basic"
+        and protocol in ("basic", "compact")
         and not needs_runtime_roi_selection
         and not debug_dir
     )
@@ -506,6 +513,57 @@ def _probe_locator_debug(
     return ldbg
 
 
+def _probe_compact_debug(
+    meta: Dict[str, Any],
+    frame: np.ndarray,
+    track_roi_local: Optional[Tuple[int, int, int, int]],
+    forced_roi_local: Optional[Tuple[int, int, int, int]],
+) -> Dict[str, Any]:
+    def _resolve_bbox(
+        view: np.ndarray, allow_full_frame: bool
+    ) -> Optional[Tuple[int, int, int, int]]:
+        bbox = _bbox_from_non_black(view)
+        if bbox is not None:
+            return bbox
+        det = detect_symbol_bbox(view)
+        if det is not None:
+            return det.bbox
+        if allow_full_frame:
+            h, w = view.shape[:2]
+            if w >= 64 and h >= 64:
+                return (0, 0, int(w), int(h))
+        return None
+
+    probe_roi = track_roi_local if track_roi_local is not None else forced_roi_local
+    if probe_roi is not None:
+        x, y, w, h = probe_roi
+        x1 = max(0, int(x))
+        y1 = max(0, int(y))
+        x2 = min(frame.shape[1], int(x + w))
+        y2 = min(frame.shape[0], int(y + h))
+        if x1 < x2 and y1 < y2:
+            view = frame[y1:y2, x1:x2]
+            bbox = _resolve_bbox(view, allow_full_frame=True)
+            if bbox is not None:
+                bx, by, bw, bh = bbox
+                mapped = (x1 + bx, y1 + by, bw, bh)
+                meta["locator_engine"] = "bbox"
+                meta["finder_candidates"] = [{"bbox": [int(v) for v in mapped], "score": 0.85}]
+                meta["confidence"] = 0.85
+                meta["fail_reason"] = ""
+                return {"finder_candidates": meta["finder_candidates"]}
+    bbox = _resolve_bbox(frame, allow_full_frame=False)
+    if bbox is not None:
+        meta["locator_engine"] = "bbox"
+        meta["finder_candidates"] = [{"bbox": [int(v) for v in bbox], "score": 0.85}]
+        meta["confidence"] = 0.85
+        meta["fail_reason"] = ""
+        return {"finder_candidates": meta["finder_candidates"]}
+    meta["locator_engine"] = "bbox"
+    meta["fail_reason"] = "NO_FINDER"
+    return {}
+
+
 def _dump_debug_snapshot(
     debug_dir: str,
     frame_index: int,
@@ -560,6 +618,13 @@ def _dump_debug_snapshot(
             grid_w=grid_w,
             grid_h=grid_h,
             locator_confidence_threshold=locator_confidence_threshold,
+        )
+    elif protocol_path_used == "compact":
+        locator_debug = _probe_compact_debug(
+            meta=meta,
+            frame=frame,
+            track_roi_local=track_roi_local,
+            forced_roi_local=forced_roi_local,
         )
 
     if not manual_strict:
@@ -683,6 +748,28 @@ def _dump_debug_snapshot(
             except Exception:
                 pass
     _save_debug_image(os.path.join(frame_dir, "quad_selected.png"), quad_canvas)
+
+    crop_rect = det_bbox_local
+    if crop_rect is None:
+        probe_bbox = meta.get("v31_probe_bbox")
+        if isinstance(probe_bbox, list) and len(probe_bbox) == 4:
+            crop_rect = tuple(int(v) for v in probe_bbox)
+    if crop_rect is None:
+        finder_candidates = locator_debug.get("finder_candidates") if isinstance(locator_debug, dict) else None
+        if isinstance(finder_candidates, list) and finder_candidates:
+            first = finder_candidates[0]
+            if isinstance(first, dict):
+                bbox = first.get("bbox")
+                if isinstance(bbox, list) and len(bbox) == 4:
+                    crop_rect = tuple(int(v) for v in bbox)
+    if crop_rect is not None:
+        x, y, w, h = crop_rect
+        x1 = max(0, x)
+        y1 = max(0, y)
+        x2 = min(raw.shape[1], x + w)
+        y2 = min(raw.shape[0], y + h)
+        if x1 < x2 and y1 < y2:
+            _save_debug_image(os.path.join(frame_dir, "bbox_crop.png"), raw[y1:y2, x1:x2].copy())
 
     warp = getattr(v31_meta, "locator_warped_preview", None) if v31_meta is not None else None
     if warp is not None and isinstance(warp, np.ndarray):
@@ -855,7 +942,7 @@ def main(argv=None):
     last_decode_error = None  # type: Optional[str]
     last_v3_meta = None
     last_v31_meta = None
-    protocol_path_used = "basic"
+    protocol_path_used = args.protocol
     decode_attempt_total = 0
     fallback_hits = 0
     locator_new_fail_reason = ""
@@ -932,27 +1019,34 @@ def main(argv=None):
         debug_dir=args.debug_dir,
         needs_runtime_roi_selection=needs_runtime_roi_selection,
     )
-    if args.debug_dir and args.source == "screen" and args.protocol == "basic":
-        print("debug-dir set: forcing legacy loop (pipeline disabled) to emit debug snapshots")
+    if args.debug_dir and args.source == "screen":
+        print(
+            "debug-dir set: forcing legacy loop (pipeline disabled) to emit debug snapshots"
+        )
     if needs_runtime_roi_selection:
         print("select-region with auto_then_manual requires legacy loop for runtime ROI selection")
     if use_pipeline:
         num_workers = args.decode_workers if args.decode_workers > 0 else None
         grid_w, grid_h = _parse_module_grid(args.module_grid)
+        guard_band, corner_size = _protocol_geometry(args.protocol)
         pipeline_seed_roi_local = _build_pipeline_seed_roi_local(source, forced_roi)
         pipeline = ReceiverPipeline(
             capture=source,
             assembler=assembler,
             num_workers=num_workers,
             capture_fps=args.capture_fps,
+            protocol=args.protocol,  # NEW: pass protocol
             grid_w=grid_w,
             grid_h=grid_h,
+            guard_band=guard_band,
+            corner_size=corner_size,
             locator_engine=args.locator_engine,
             locator_confidence_threshold=args.locator_confidence_threshold,
             initial_search_roi=pipeline_seed_roi_local,
         )
         print(
-            "pipeline mode: workers={0} capture_fps={1} seed_roi={2}".format(
+            "pipeline mode: protocol={0} workers={1} capture_fps={2} seed_roi={3}".format(
+                args.protocol,
                 num_workers if num_workers is not None else "auto",
                 args.capture_fps,
                 "none"
@@ -1202,7 +1296,7 @@ def main(argv=None):
 
             try:
                 t_decode0 = time.perf_counter()
-                if args.protocol == "basic":
+                if args.protocol in ("basic", "compact"):
                     last_grid_exc = None
                     if replay_mode:
                         v31_mode = "full"
@@ -1218,10 +1312,14 @@ def main(argv=None):
                     roi_only = manual_decode_roi_local is not None and (
                         args.roi_mode == "manual" or stats.manual_roi_applied
                     )
+                    decode_fn = (
+                        decode_frame_compact if args.protocol == "compact" else decode_frame_basic
+                    )
+                    guard_band, corner_size = _protocol_geometry(args.protocol)
                     for gw, gh in grid_candidates:
                         decode_attempt_total += 1
                         try:
-                            header, payload, meta31 = decode_frame_basic(
+                            header, payload, meta31 = decode_fn(
                                 frame=frame,
                                 detect_mode=v31_mode,
                                 forced_roi=manual_decode_roi_local
@@ -1229,6 +1327,8 @@ def main(argv=None):
                                 else v3_track_roi,
                                 grid_w=gw,
                                 grid_h=gh,
+                                guard_band=guard_band,
+                                corner_size=corner_size,
                                 roi_only=roi_only,
                                 manual_strict=manual_strict,
                                 locator_engine=args.locator_engine,
@@ -1243,12 +1343,14 @@ def main(argv=None):
                             if not replay_mode and not manual_strict and v31_mode == "track":
                                 try:
                                     decode_attempt_total += 1
-                                    header, payload, meta31 = decode_frame_basic(
+                                    header, payload, meta31 = decode_fn(
                                         frame=frame,
                                         detect_mode="full",
                                         forced_roi=forced_roi_local,
                                         grid_w=gw,
                                         grid_h=gh,
+                                        guard_band=guard_band,
+                                        corner_size=corner_size,
                                         roi_only=False,
                                         manual_strict=False,
                                         locator_engine=args.locator_engine,
@@ -1264,7 +1366,7 @@ def main(argv=None):
                     stats.on_locator(confidence=float(meta31.det_confidence), failed=False)
                     frame_v31_meta = meta31
                     last_v31_meta = meta31
-                    protocol_path_used = "basic"
+                    protocol_path_used = args.protocol
                     last_det_bbox = meta31.det_bbox
                     last_det_confidence = float(meta31.det_confidence)
                     locator_new_fail_reason = meta31.new_fail_reason
@@ -1291,8 +1393,9 @@ def main(argv=None):
                     if args.detect_mode != "full" and not replay_mode:
                         v3_mode = "track"
                 else:
-                    # Legacy protocols removed - only basic protocol supported
-                    raise ValueError(f"Protocol '{args.protocol}' no longer supported, use 'basic'")
+                    raise ValueError(
+                        f"Protocol '{args.protocol}' not supported, use 'basic' or 'compact'"
+                    )
                 auto_fail_count = 0
                 last_decode_error = None
                 decode_time_sum += max(0.0, time.perf_counter() - t_decode0)
@@ -1319,7 +1422,7 @@ def main(argv=None):
                     pass
                 else:
                     last_decode_error = str(last_exc)
-                    if args.protocol == "basic":
+                    if args.protocol in ("basic", "compact"):
                         v3_fail_streak += 1
                         # Fast recovery: return to full search after a few consecutive misses.
                         if v3_fail_streak >= 3 and not replay_mode:

@@ -1,0 +1,41 @@
+[
+  {
+    "benchmark_kind": "real_frame_decode",
+    "protocol": "basic",
+    "dataset_name": "basic_regression",
+    "frames_total": 5,
+    "success_rate": 1.0,
+    "locator_decode_ms_avg": 182.8848032047972,
+    "locator_decode_ms_std": 36.58139383387818,
+    "locator_engine_breakdown": {
+      "new": 5
+    },
+    "failures": []
+  },
+  {
+    "benchmark_kind": "real_frame_decode",
+    "protocol": "compact",
+    "dataset_name": "compact",
+    "frames_total": 5,
+    "success_rate": 1.0,
+    "locator_decode_ms_avg": 92.89137459127232,
+    "locator_decode_ms_std": 10.908166272426904,
+    "locator_engine_breakdown": {
+      "corner": 5
+    },
+    "failures": []
+  },
+  {
+    "benchmark_kind": "real_frame_decode",
+    "protocol": "compact",
+    "dataset_name": "compact_v4",
+    "frames_total": 5,
+    "success_rate": 1.0,
+    "locator_decode_ms_avg": 88.05110336979851,
+    "locator_decode_ms_std": 10.28654463930776,
+    "locator_engine_breakdown": {
+      "corner": 5
+    },
+    "failures": []
+  }
+]

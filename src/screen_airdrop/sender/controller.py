@@ -18,7 +18,8 @@ from screen_airdrop.common.protocol_basic import (
     FRAME_SYNC,
     FrameHeaderBasic,
 )
-from screen_airdrop.sender.encoder_basic import encode_frame_basic, frame_capacity_bytes_basic
+from screen_airdrop.sender.protocol_adapter_basic import BasicProtocolEncoder
+from screen_airdrop.sender.protocol_adapter_compact import CompactProtocolEncoder
 from screen_airdrop.sender.renderer_cv2 import CV2Renderer
 
 DEFAULT_WIDTH = 1920
@@ -109,6 +110,7 @@ def build_encoded_frames(
 
     gw = 160
     gh = 96
+    encoder = None
     if protocol == "basic":
         if ecc_level not in ECC_LEVELS:
             raise RuntimeError("invalid ecc-level: {0}".format(ecc_level))
@@ -117,28 +119,57 @@ def build_encoded_frames(
         except Exception as exc:
             raise RuntimeError("invalid module-grid {0}: {1}".format(module_grid, exc))
         version = 1  # basic protocol
-        cap = frame_capacity_bytes_basic(
-            gw,
-            gh,
+
+        # Create protocol encoder
+        encoder = BasicProtocolEncoder(
+            grid_w=gw,
+            grid_h=gh,
             ecc_level=ecc_level,
             guard_band=guard_band_modules,
             corner_size=corner_size_modules,
+            outer_padding_px=outer_padding_px,
+            outer_padding_white=outer_padding_white,
         )
+        layout_info = encoder.get_layout()
+        cap = layout_info.data_capacity_bits // 8
+    elif protocol == "compact":
+        if ecc_level not in ECC_LEVELS:
+            raise RuntimeError("invalid ecc-level: {0}".format(ecc_level))
+        try:
+            gw, gh = [int(p) for p in module_grid.lower().split("x")]
+        except Exception as exc:
+            raise RuntimeError("invalid module-grid {0}: {1}".format(module_grid, exc))
+        version = 1  # compact protocol
+
+        # Create compact protocol encoder
+        encoder = CompactProtocolEncoder(
+            grid_w=gw,
+            grid_h=gh,
+            ecc_level=ecc_level,
+            guard_band=1,  # Compact default
+            corner_size=7,  # Compact default
+            outer_padding_px=outer_padding_px,
+            outer_padding_white=outer_padding_white,
+        )
+        layout_info = encoder.get_layout()
+        cap = layout_info.data_capacity_bits // 8
     else:
-        raise ValueError(f"Protocol '{protocol}' no longer supported, use 'basic'")
+        raise ValueError(f"Protocol '{protocol}' not supported, use 'basic' or 'compact'")
     effective_chunk_size = int(chunk_size)
-    if protocol == "basic":
+    if protocol in ("basic", "compact"):
         robust_cap = min(int(cap), max(64, int(cap * 0.9)))
         if effective_chunk_size > robust_cap:
             effective_chunk_size = robust_cap
             print(
-                "basic robust chunk-size cap applied: requested={0} frame_capacity={1} robust_cap={2}".format(
+                "{0} robust chunk-size cap applied: requested={1} frame_capacity={2} robust_cap={3}".format(
+                    protocol,
                     chunk_size,
                     cap,
                     effective_chunk_size,
                 )
             )
-    elif effective_chunk_size > cap:
+
+    if effective_chunk_size > cap:
         raise RuntimeError(
             "chunk-size {0} exceeds frame payload capacity {1} at {2}x{3}/block={4}".format(
                 chunk_size, cap, width, height, block_size
@@ -174,45 +205,26 @@ def build_encoded_frames(
     }
 
     for i in range(max(0, sync_frames)):
-        if protocol == "basic":
-            header = FrameHeaderBasic.make(
-                frame_type=FRAME_SYNC,
-                session_id=session_id,
-                epoch_id=0,
-                frame_id=i,
-                total_frames=total_data_frames,
-                chunk_id=0,
-                payload=b"",
-            )
-        else:
-            header = FrameHeaderBasic.make(
-                frame_type=FRAME_SYNC,
-                session_id=session_id,
-                epoch_id=0,
-                frame_id=i,
-                total_frames=total_data_frames,
-                chunk_id=0,
-                payload=b"",
-                version=version,
-            )
+        header = FrameHeaderBasic.make(
+            frame_type=FRAME_SYNC,
+            session_id=session_id,
+            epoch_id=0,
+            frame_id=i,
+            total_frames=total_data_frames,
+            chunk_id=0,
+            payload=b"",
+        )
         yield {
             "kind": "sync",
             "epoch": 0,
             "frame_id": i,
             "chunk_id": 0,
             "metadata": metadata,
-            "image": encode_frame_basic(
+            "image": encoder.encode_frame(
                 header,
                 b"",
                 width=width,
                 height=height,
-                grid_w=gw,
-                grid_h=gh,
-                ecc_level=ecc_level,
-                guard_band=guard_band_modules,
-                corner_size=corner_size_modules,
-                outer_padding_px=outer_padding_px,
-                outer_padding_white=outer_padding_white,
             ),
         }
 
@@ -220,178 +232,75 @@ def build_encoded_frames(
         frame_id = 0
         manifest_chunk = chunks[0]
         for _ in range(manifest_repeat):
-            if protocol == "basic":
-                header = FrameHeaderBasic.make(
-                    frame_type=FRAME_DATA,
-                    session_id=session_id,
-                    epoch_id=epoch,
-                    frame_id=frame_id,
-                    total_frames=total_data_frames,
-                    chunk_id=0,
-                    payload=manifest_chunk,
-                )
-            else:
-                header = FrameHeaderBasic.make(
-                    frame_type=FRAME_DATA,
-                    session_id=session_id,
-                    epoch_id=epoch,
-                    frame_id=frame_id,
-                    total_frames=total_data_frames,
-                    chunk_id=0,
-                    payload=manifest_chunk,
-                    version=version,
-                )
+            header = FrameHeaderBasic.make(
+                frame_type=FRAME_DATA,
+                session_id=session_id,
+                epoch_id=epoch,
+                frame_id=frame_id,
+                total_frames=total_data_frames,
+                chunk_id=0,
+                payload=manifest_chunk,
+            )
             yield {
                 "kind": "data",
                 "epoch": epoch,
                 "frame_id": frame_id,
                 "chunk_id": 0,
                 "metadata": metadata,
-                "image": encode_frame_basic(
+                "image": encoder.encode_frame(
                     header,
                     manifest_chunk,
                     width=width,
                     height=height,
-                    grid_w=gw,
-                    grid_h=gh,
-                    ecc_level=ecc_level,
-                    guard_band=guard_band_modules,
-                    corner_size=corner_size_modules,
-                    outer_padding_px=outer_padding_px,
-                    outer_padding_white=outer_padding_white,
                 ),
             }
             frame_id += 1
 
         for chunk_id, chunk in enumerate(payload_chunks, start=1):
-            if protocol == "basic":
-                header = FrameHeaderBasic.make(
-                    frame_type=FRAME_DATA,
-                    session_id=session_id,
-                    epoch_id=epoch,
-                    frame_id=frame_id,
-                    total_frames=total_data_frames,
-                    chunk_id=chunk_id,
-                    payload=chunk,
-                )
-            else:
-                header = FrameHeaderBasic.make(
-                    frame_type=FRAME_DATA,
-                    session_id=session_id,
-                    epoch_id=epoch,
-                    frame_id=frame_id,
-                    total_frames=total_data_frames,
-                    chunk_id=chunk_id,
-                    payload=chunk,
-                    version=version,
-                )
+            header = FrameHeaderBasic.make(
+                frame_type=FRAME_DATA,
+                session_id=session_id,
+                epoch_id=epoch,
+                frame_id=frame_id,
+                total_frames=total_data_frames,
+                chunk_id=chunk_id,
+                payload=chunk,
+            )
             yield {
                 "kind": "data",
                 "epoch": epoch,
                 "frame_id": frame_id,
                 "chunk_id": chunk_id,
                 "metadata": metadata,
-                "image": (
-                    encode_frame_basic(
-                        header,
-                        chunk,
-                        width=width,
-                        height=height,
-                        grid_w=gw,
-                        grid_h=gh,
-                        ecc_level=ecc_level,
-                        guard_band=guard_band_modules,
-                        corner_size=corner_size_modules,
-                        outer_padding_px=outer_padding_px,
-                        outer_padding_white=outer_padding_white,
-                    )
-                    if protocol == "basic"
-                    else encode_frame_basic(
-                        header,
-                        chunk,
-                        width=width,
-                        height=height,
-                        grid_w=gw,
-                        grid_h=gh,
-                        ecc_level=ecc_level,
-                        outer_padding_px=outer_padding_px,
-                        outer_padding_white=outer_padding_white,
-                    )
-                    if False
-                    else encode_frame_basic(
-                        header,
-                        chunk,
-                        width=width,
-                        height=height,
-                        block_size=block_size,
-                        quiet_zone_px=quiet_zone_px,
-                    )
+                "image": encoder.encode_frame(
+                    header,
+                    chunk,
+                    width=width,
+                    height=height,
                 ),
             }
             frame_id += 1
 
-        if protocol == "basic":
-            end_header = FrameHeaderBasic.make(
-                frame_type=FRAME_END,
-                session_id=session_id,
-                epoch_id=epoch,
-                frame_id=frame_id,
-                total_frames=total_data_frames,
-                chunk_id=0,
-                payload=b"",
-            )
-        else:
-            end_header = FrameHeaderBasic.make(
-                frame_type=FRAME_END,
-                session_id=session_id,
-                epoch_id=epoch,
-                frame_id=frame_id,
-                total_frames=total_data_frames,
-                chunk_id=0,
-                payload=b"",
-                version=version,
-            )
+        end_header = FrameHeaderBasic.make(
+            frame_type=FRAME_END,
+            session_id=session_id,
+            epoch_id=epoch,
+            frame_id=frame_id,
+            total_frames=total_data_frames,
+            chunk_id=0,
+            payload=b"",
+        )
         yield {
             "kind": "end",
             "epoch": epoch,
             "frame_id": frame_id,
             "chunk_id": 0,
             "metadata": metadata,
-            "image": (
-                encode_frame_basic(
-                    end_header,
-                    b"",
-                    width=width,
-                    height=height,
-                    grid_w=gw,
-                    grid_h=gh,
-                    ecc_level=ecc_level,
-                    guard_band=guard_band_modules,
-                    corner_size=corner_size_modules,
-                    outer_padding_px=outer_padding_px,
-                    outer_padding_white=outer_padding_white,
-                )
-                if protocol == "basic"
-                else encode_frame_basic(
-                    end_header,
-                    b"",
-                    width=width,
-                    height=height,
-                    grid_w=gw,
-                    grid_h=gh,
-                    ecc_level=ecc_level,
-                    outer_padding_px=outer_padding_px,
-                    outer_padding_white=outer_padding_white,
-                )
-                if False
-                else encode_frame_basic(
-                    end_header,
-                    b"",
-                    width=width,
-                    height=height,
-                    block_size=block_size,
-                    quiet_zone_px=quiet_zone_px,
-                )
+            "image": encoder.encode_frame(
+                end_header,
+                b"",
+                width=width,
+                height=height,
             ),
         }
 
@@ -428,6 +337,8 @@ def run_sender(
     outer_padding_px: int = 0,
     outer_padding_color: str = "black",
     stats_interval: float = 1.0,
+    width: int = DEFAULT_WIDTH,
+    height: int = DEFAULT_HEIGHT,
 ) -> int:
     if outer_padding_color.lower() not in ("black", "white"):
         raise RuntimeError("invalid outer-padding-color: {0}".format(outer_padding_color))
@@ -442,8 +353,8 @@ def run_sender(
             sync_frames=sync_frames,
             manifest_repeat=manifest_repeat,
             epochs=max_epochs,
-            width=DEFAULT_WIDTH,
-            height=DEFAULT_HEIGHT,
+            width=width,
+            height=height,
             session_id=session_id,
             protocol=protocol,
             quiet_zone_px=quiet_zone_px,
@@ -469,7 +380,8 @@ def run_sender(
     # Payload-only theoretical throughput, in KiB/s.
     theoretical_payload_kibps = float(effective_chunk_size * max(1, fps)) / 1024.0
     print(
-        "session_id={0} payload_size={1} total_chunks={2} frame_payload_cap={3} theoretical_payload_KiBps={4:.2f}".format(
+        "protocol={0} session_id={1} payload_size={2} total_chunks={3} frame_payload_cap={4} theoretical_payload_KiBps={5:.2f}".format(
+            protocol,
             session_id,
             len(payload),
             len(payload_chunks),

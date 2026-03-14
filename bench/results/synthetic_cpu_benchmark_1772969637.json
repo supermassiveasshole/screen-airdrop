@@ -1,0 +1,54 @@
+[
+  {
+    "benchmark_kind": "synthetic_cpu",
+    "protocol": "basic",
+    "config": {
+      "protocol": "basic",
+      "grid_w": 160,
+      "grid_h": 96
+    },
+    "ecc_level": "Q",
+    "payload_mode": "max",
+    "payload_bytes": 536,
+    "payload_bits_per_module": 0.17911445279866334,
+    "capacity_bytes": 596,
+    "frame_size_modules": [
+      190,
+      126
+    ],
+    "finder_size": 9,
+    "guard_band": 2,
+    "iterations": 5,
+    "encode_ms": 22.483433596789837,
+    "decode_ms": 262.06521739950404,
+    "total_ms": 284.5486509962939,
+    "success_rate": 1.0,
+    "synthetic_cpu_kib_per_s": 1.8395360447757578
+  },
+  {
+    "benchmark_kind": "synthetic_cpu",
+    "protocol": "compact",
+    "config": {
+      "protocol": "compact",
+      "grid_w": 160,
+      "grid_h": 96
+    },
+    "ecc_level": "Q",
+    "payload_mode": "max",
+    "payload_bytes": 536,
+    "payload_bits_per_module": 0.19420289855072465,
+    "capacity_bytes": 596,
+    "frame_size_modules": [
+      184,
+      120
+    ],
+    "finder_size": 7,
+    "guard_band": 1,
+    "iterations": 5,
+    "encode_ms": 19.671340205240995,
+    "decode_ms": 137.3192461906001,
+    "total_ms": 156.9905863958411,
+    "success_rate": 1.0,
+    "synthetic_cpu_kib_per_s": 3.3341967312625225
+  }
+]

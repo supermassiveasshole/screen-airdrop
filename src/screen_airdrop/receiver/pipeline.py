@@ -11,10 +11,16 @@ from typing import Any, Dict, Optional, Tuple, Union
 
 import numpy as np
 
-from screen_airdrop.common.protocol_basic import DEFAULT_GRID_H, DEFAULT_GRID_W, FRAME_DATA
+from screen_airdrop.common.protocol_basic import (
+    DEFAULT_GRID_H,
+    DEFAULT_GRID_W,
+    FRAME_DATA,
+)
 from screen_airdrop.receiver.assembler import ChunkAssembler
 from screen_airdrop.receiver.capture_mss import compute_frame_diff, screenshot_to_bgr
-from screen_airdrop.receiver.decoder_basic import DecodeMetaBasic, decode_frame_basic
+from screen_airdrop.receiver.decoder_basic import DecodeMetaBasic
+from screen_airdrop.receiver.protocol_adapter_basic import BasicProtocolDecoder
+from screen_airdrop.receiver.protocol_adapter_compact import CompactProtocolDecoder
 
 
 @dataclass
@@ -175,6 +181,7 @@ class DecodeWorker(threading.Thread):
         result_queue: queue.Queue,
         stop_event: threading.Event,
         stats: PipelineStats,
+        protocol: str = "basic",  # NEW: protocol selection
         grid_w: int = DEFAULT_GRID_W,
         grid_h: int = DEFAULT_GRID_H,
         guard_band: int = 2,
@@ -200,6 +207,34 @@ class DecodeWorker(threading.Thread):
         self._track_roi: Optional[Tuple[int, int, int, int]] = initial_search_roi
         self.error: Optional[Exception] = None
 
+        if protocol == "compact" and guard_band == 2 and corner_size == 9:
+            guard_band = 1
+            corner_size = 7
+            self._guard_band = guard_band
+            self._corner_size = corner_size
+
+        # Create protocol decoder based on protocol type
+        if protocol == "basic":
+            self._decoder = BasicProtocolDecoder(
+                grid_w=grid_w,
+                grid_h=grid_h,
+                guard_band=guard_band,
+                corner_size=corner_size,
+                locator_engine=locator_engine,
+                locator_confidence_threshold=locator_confidence_threshold,
+            )
+        elif protocol == "compact":
+            self._decoder = CompactProtocolDecoder(
+                grid_w=grid_w,
+                grid_h=grid_h,
+                guard_band=guard_band,
+                corner_size=corner_size,
+                locator_engine=locator_engine,
+                locator_confidence_threshold=locator_confidence_threshold,
+            )
+        else:
+            raise ValueError(f"Unknown protocol: {protocol}")
+
     def run(self) -> None:
         try:
             self._run_loop()
@@ -216,17 +251,15 @@ class DecodeWorker(threading.Thread):
             try:
                 search_roi = self._track_roi
                 detect_mode = "track" if search_roi is not None else "full"
-                header, payload, meta = decode_frame_basic(
+                decoded = self._decoder.decode_frame(
                     frame=frame,
                     detect_mode=detect_mode,
                     forced_roi=search_roi,
-                    grid_w=self._grid_w,
-                    grid_h=self._grid_h,
-                    guard_band=self._guard_band,
-                    corner_size=self._corner_size,
-                    locator_engine=self._locator_engine,
-                    locator_confidence_threshold=self._locator_confidence_threshold,
                 )
+                header = decoded.frame_header
+                payload = decoded.payload
+                meta = decoded.meta
+
                 # Update per-worker track ROI from successful decode
                 bx, by, bw, bh = meta.det_bbox
                 fh, fw = frame.shape[:2]
@@ -330,6 +363,7 @@ class ReceiverPipeline:
         frame_diff_threshold: float = 0.015,
         frame_queue_size: int = 32,
         result_queue_size: int = 256,
+        protocol: str = "basic",  # NEW: protocol selection
         grid_w: int = DEFAULT_GRID_W,
         grid_h: int = DEFAULT_GRID_H,
         guard_band: int = 2,
@@ -339,6 +373,9 @@ class ReceiverPipeline:
         on_frame_callback: Optional[Any] = None,
         initial_search_roi: Optional[Tuple[int, int, int, int]] = None,
     ) -> None:
+        if protocol == "compact" and guard_band == 2 and corner_size == 9:
+            guard_band = 1
+            corner_size = 7
         if num_workers is None:
             num_workers = min(4, max(1, (os.cpu_count() or 2) // 2))
         self._num_workers = num_workers
@@ -364,6 +401,7 @@ class ReceiverPipeline:
                 result_queue=self._result_queue,
                 stop_event=self._stop_event,
                 stats=self.stats,
+                protocol=protocol,  # NEW: pass protocol to workers
                 grid_w=grid_w,
                 grid_h=grid_h,
                 guard_band=guard_band,

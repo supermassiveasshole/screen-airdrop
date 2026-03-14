@@ -28,6 +28,8 @@ def build_parser():
         "--module-grid", default="160x96", help="module grid size (affects frame capacity)"
     )
     parser.add_argument("--window-name", default="screen-airdrop", help="sender window title")
+    parser.add_argument("--frame-width", type=int, default=1920, help="rendered frame width in pixels")
+    parser.add_argument("--frame-height", type=int, default=1080, help="rendered frame height in pixels")
     parser.add_argument(
         "--max-epochs", type=int, default=0, help="max transmission epochs (0=unlimited)"
     )
@@ -38,7 +40,7 @@ def build_parser():
     )
     parser.add_argument(
         "--protocol",
-        choices=["basic"],
+        choices=["basic", "compact"],
         default="basic",
         help="protocol name",
     )
@@ -50,6 +52,8 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    guard_band_modules = 1 if args.protocol == "compact" else 2
+    corner_size_modules = 7 if args.protocol == "compact" else 9
     return run_sender(
         input_path=args.input_path,
         block_size=6,  # Hardcoded default
@@ -67,11 +71,13 @@ def main(argv=None):
         quiet_zone_px=48,  # Hardcoded default
         ecc_level=args.ecc_level,
         module_grid=args.module_grid,
-        guard_band_modules=2,  # Hardcoded default
-        corner_size_modules=9,  # Hardcoded default
+        guard_band_modules=guard_band_modules,
+        corner_size_modules=corner_size_modules,
         outer_padding_px=0,  # Hardcoded default
         outer_padding_color="black",  # Hardcoded default (removed confusing white option)
         stats_interval=args.stats_interval,
+        width=args.frame_width,
+        height=args.frame_height,
     )
 
 

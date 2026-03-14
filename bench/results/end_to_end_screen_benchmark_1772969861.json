@@ -1,0 +1,36 @@
+[
+  {
+    "benchmark_kind": "end_to_end_screen_runbook",
+    "protocol": "basic",
+    "config": {
+      "protocol": "basic",
+      "grid_w": 160,
+      "grid_h": 96
+    },
+    "ecc_level": "Q",
+    "payload_mode": "fixed",
+    "payload_bytes": 500,
+    "fps": 12,
+    "capture_fps": 30,
+    "stats_interval": 1.0,
+    "sender_command": "uv run screen-airdrop-sender /Users/waldron/Code/screen-airdrop/tests/fixtures/real_data/docs_small --protocol basic --module-grid 160x96 --ecc-level Q --fps 12 --chunk-size 500 --stats-interval 1.0",
+    "receiver_command": "uv run screen-airdrop-receiver --source screen --protocol basic --module-grid 160x96 --roi-interactive --capture-fps 30 --stats-interval 1.0 --output-dir ./recovered_basic_Q_fixed"
+  },
+  {
+    "benchmark_kind": "end_to_end_screen_runbook",
+    "protocol": "compact",
+    "config": {
+      "protocol": "compact",
+      "grid_w": 160,
+      "grid_h": 96
+    },
+    "ecc_level": "Q",
+    "payload_mode": "fixed",
+    "payload_bytes": 500,
+    "fps": 12,
+    "capture_fps": 30,
+    "stats_interval": 1.0,
+    "sender_command": "uv run screen-airdrop-sender /Users/waldron/Code/screen-airdrop/tests/fixtures/real_data/docs_small --protocol compact --module-grid 160x96 --ecc-level Q --fps 12 --chunk-size 500 --stats-interval 1.0",
+    "receiver_command": "uv run screen-airdrop-receiver --source screen --protocol compact --module-grid 160x96 --roi-interactive --capture-fps 30 --stats-interval 1.0 --output-dir ./recovered_compact_Q_fixed"
+  }
+]

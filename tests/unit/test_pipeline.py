@@ -9,8 +9,10 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 
-from screen_airdrop.common.protocol_basic import FRAME_DATA
+from screen_airdrop.common.protocol_basic import FRAME_DATA, FrameHeaderBasic
+from screen_airdrop.common.protocol_interface import DecodedFrame
 from screen_airdrop.receiver.assembler import ChunkAssembler
+from screen_airdrop.receiver.decoder_basic import DecodeMetaBasic
 from screen_airdrop.receiver.pipeline import (
     AssemblerThread,
     DecodeResult,
@@ -38,6 +40,37 @@ def _make_black_frame(h=100, w=100):
     return np.zeros((h, w, 3), dtype=np.uint8)
 
 
+def _make_meta(
+    det_bbox=(20, 10, 60, 40),
+    confidence=0.9,
+    elapsed_ms=10.0,
+    legacy_used=False,
+    mask_id=3,
+    grid_size="160x96",
+):
+    return DecodeMetaBasic(
+        protocol_version_used=31,
+        locator_engine="auto",
+        confidence=confidence,
+        fail_reason="",
+        elapsed_ms=elapsed_ms,
+        legacy_used=legacy_used,
+        homography_rmse=1.25,
+        rs_corrected_symbols=2,
+        crc_ok=True,
+        mask_id=mask_id,
+        grid_size=grid_size,
+        det_bbox=det_bbox,
+        decode_attempts=2,
+        det_confidence=confidence,
+        new_fail_reason="",
+        new_elapsed_ms=elapsed_ms,
+        legacy_elapsed_ms=0.0,
+        locator_debug_artifacts={"path": "kept"},
+        locator_warped_preview=None,
+    )
+
+
 # ---------------------------------------------------------------------------
 # PipelineStats
 # ---------------------------------------------------------------------------
@@ -58,7 +91,6 @@ class TestPipelineStats:
 
     def test_concurrent_increments(self):
         stats = PipelineStats()
-        errors = []
 
         def worker():
             for _ in range(1000):
@@ -84,7 +116,6 @@ class TestCaptureThreadQueueDrop:
         """When the frame queue is full, CaptureThread should evict the oldest
         entry so the queue always contains fresh frames."""
         fq = queue.Queue(maxsize=4)
-        stop = threading.Event()
         stats = PipelineStats()
 
         # Pre-fill queue with sentinel frames
@@ -288,16 +319,23 @@ class TestDecodeWorker:
 
         calls = []
 
-        def _fake_decode_frame_basic(**kwargs):
+        def _fake_decode_frame(**kwargs):
             calls.append(kwargs)
             stop.set()
-            header = MagicMock(chunk_id=1, frame_id=1, frame_type=FRAME_DATA)
-            meta = MagicMock(det_bbox=(20, 10, 60, 40))
-            return header, b"ok", meta
+            header = FrameHeaderBasic.make(
+                frame_type=FRAME_DATA,
+                session_id=1,
+                epoch_id=0,
+                frame_id=1,
+                total_frames=10,
+                chunk_id=1,
+                payload=b"ok",
+            )
+            return DecodedFrame(frame_header=header, payload=b"ok", meta=_make_meta())
 
         with patch(
-            "screen_airdrop.receiver.pipeline.decode_frame_basic",
-            side_effect=_fake_decode_frame_basic,
+            "screen_airdrop.receiver.protocol_adapter_basic.BasicProtocolDecoder.decode_frame",
+            side_effect=_fake_decode_frame,
         ):
             worker = DecodeWorker(
                 worker_id=0,
@@ -315,6 +353,10 @@ class TestDecodeWorker:
         assert calls[0]["forced_roi"] == (1, 2, 50, 50)
         assert stats.decode_ok == 1
         assert rq.qsize() == 1
+        result = rq.get_nowait()
+        assert result.meta.homography_rmse == 1.25
+        assert result.meta.rs_corrected_symbols == 2
+        assert result.meta.locator_debug_artifacts == {"path": "kept"}
 
     def test_result_queue_full_is_counted(self):
         fq = queue.Queue()
@@ -324,16 +366,27 @@ class TestDecodeWorker:
         fq.put(_make_black_frame(100, 100))
         rq.put(object())  # pre-fill to force Full on put
 
-        def _fake_decode_frame_basic(**kwargs):
+        def _fake_decode_frame(**kwargs):
             _ = kwargs
             stop.set()
-            header = MagicMock(chunk_id=1, frame_id=1, frame_type=FRAME_DATA)
-            meta = MagicMock(det_bbox=(10, 10, 40, 40))
-            return header, b"ok", meta
+            header = FrameHeaderBasic.make(
+                frame_type=FRAME_DATA,
+                session_id=1,
+                epoch_id=0,
+                frame_id=1,
+                total_frames=10,
+                chunk_id=1,
+                payload=b"ok",
+            )
+            return DecodedFrame(
+                frame_header=header,
+                payload=b"ok",
+                meta=_make_meta(det_bbox=(10, 10, 40, 40)),
+            )
 
         with patch(
-            "screen_airdrop.receiver.pipeline.decode_frame_basic",
-            side_effect=_fake_decode_frame_basic,
+            "screen_airdrop.receiver.protocol_adapter_basic.BasicProtocolDecoder.decode_frame",
+            side_effect=_fake_decode_frame,
         ):
             worker = DecodeWorker(
                 worker_id=0,
@@ -355,14 +408,14 @@ class TestDecodeWorker:
         stats = PipelineStats()
         fq.put(_make_black_frame(100, 100))
 
-        def _fake_decode_frame_basic(**kwargs):
+        def _fake_decode_frame(**kwargs):
             _ = kwargs
             stop.set()
             raise ValueError("decode failed")
 
         with patch(
-            "screen_airdrop.receiver.pipeline.decode_frame_basic",
-            side_effect=_fake_decode_frame_basic,
+            "screen_airdrop.receiver.protocol_adapter_basic.BasicProtocolDecoder.decode_frame",
+            side_effect=_fake_decode_frame,
         ):
             worker = DecodeWorker(
                 worker_id=0,

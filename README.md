@@ -80,20 +80,24 @@ Packaging:
 运行快速 replay 基准：
 
 ```bash
-uv run python bench/run_benchmark.py --mode replay --quick
+uv run python bench/compare_protocols.py --protocol all --ecc Q --payload-mode fixed --payload-size 500
+uv run python bench/compare_decode_real.py --protocol all --iterations 15
+uv run python bench/compare_end_to_end.py --mode replay --protocol all --ecc Q --payload-mode fixed --payload-size 500
 uv run python bench/summarize.py
 ```
 
-完整 replay 基准（3 次重复 + 参数矩阵）：
+单窗口 decode-success 粗筛：
 
 ```bash
-uv run python bench/run_benchmark.py --mode replay --repeats 3
+uv run python bench/scan_frame_decode_success.py --mode screen
 ```
 
 输出文件：
 
-* `bench/results/benchmark_*.json`
-* `bench/results/summary_*.json`
+* `bench/results/synthetic_cpu_benchmark_*.json`
+* `bench/results/real_frame_decode_benchmark_*.json`
+* `bench/results/end_to_end_*_benchmark_*.json`
+* `bench/results/frame_decode_success_scan_*.json`
 * `bench/results/summary.md`
 
 ## 指标解释

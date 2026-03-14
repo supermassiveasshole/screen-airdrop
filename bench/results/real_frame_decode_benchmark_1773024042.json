@@ -1,0 +1,28 @@
+[
+  {
+    "benchmark_kind": "real_frame_decode",
+    "protocol": "compact",
+    "dataset_name": "compact",
+    "frames_total": 5,
+    "success_rate": 1.0,
+    "locator_decode_ms_avg": 90.61999480472878,
+    "locator_decode_ms_std": 26.08987650188828,
+    "locator_engine_breakdown": {
+      "corner": 5
+    },
+    "failures": []
+  },
+  {
+    "benchmark_kind": "real_frame_decode",
+    "protocol": "compact",
+    "dataset_name": "compact_v4",
+    "frames_total": 5,
+    "success_rate": 1.0,
+    "locator_decode_ms_avg": 80.16393299913034,
+    "locator_decode_ms_std": 7.5197852823441815,
+    "locator_engine_breakdown": {
+      "corner": 5
+    },
+    "failures": []
+  }
+]
