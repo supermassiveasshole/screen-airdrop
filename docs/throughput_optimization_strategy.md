@@ -1,7 +1,7 @@
 # Screen-Airdrop Throughput Optimization Strategy
 
-**Version**: 1.0
-**Date**: 2026-03-09
+**Version**: 1.1
+**Date**: 2026-03-15
 **Status**: Master Plan
 
 ---
@@ -56,6 +56,28 @@ It answers five questions:
 1. **Compact is validated**: Real improvement confirmed in local screen capture
 2. **L-level ECC is viable**: `--ecc-level L` achieves ~40 KB/s in current test environment
 3. **Capture is the bottleneck**: Not locator (grab: 50-70ms, locate: 20-30ms, decode: 10-15ms)
+4. **Gray4 payload is not currently the first failure mode**:
+   - On clean replay, `gray4` payload decode is now stable and full file restore succeeds
+   - Under controlled blur (`gaussian_blur_5`), the first observed failure is still `bad v3 magic`
+   - This means the current bottleneck is **control/header survivability**, not payload FEC strength
+
+### Gray4 Interim Status
+
+`gray4` has now crossed the threshold from "prototype that may or may not work" to "payload modulation path is viable, but control-plane robustness is the limiting factor."
+
+What is already established:
+- `gray4` can exceed prior `compact` throughput in clean local screen conditions
+- `gray4` replay/debug datasets show `data plane` can decode correctly when capture is ideal
+- Additional payload-only demodulation tweaks do not address the dominant blur failure mode
+- Low-cost sender-side diversity can matter: in a static display/capture chain,
+  changing data-frame masks across epochs has been observed to recover chunks
+  that remained permanently missing under deterministic replay of the same
+  visual pattern
+
+What is not yet solved:
+- Header/control decode still collapses before payload under moderate blur
+- Therefore, simply adding stronger payload coding would not solve the real entry problem
+- The next architectural step is no longer "more gray4 tuning", but "explicit robust control plane"
 
 **Implication**: Prioritize single-frame information density and decode stability before major locator refactoring.
 
@@ -82,6 +104,20 @@ Protocol evolution splits into two independent layers:
 2. **Phase & Sampling**: Estimate sampling phase from timing/pilot, determine module centers
 3. **Symbol Decision**: Binary threshold (basic/compact), 4-level slicing (gray4), layered strategies
 4. **Frame-Level Validity**: Is header trustworthy? Is payload trustworthy? Accept, discard, or treat as erasure?
+
+**Critical Observation**:
+- The control plane is the receiver's entry condition
+- If header/control dies first, payload redundancy is irrelevant because the receiver never enters the correct decode state
+- Therefore future physical-layer work MUST treat control/header survivability as a first-class design axis, not as a side-effect of payload modulation
+- Separately, data-plane retries SHOULD NOT assume that repeating the exact
+  same rendered pattern is meaningful recovery; in static visual channels,
+  sender-side diversity may be required to turn retries into genuinely new
+  recovery opportunities
+- This applies not only across epochs but also within any future sliding-window
+  or overlap-based redundancy scheme: repeated transmission of the same logical
+  chunk/symbol SHOULD be allowed to vary its visual realization (for example
+  mask, whitening, or placement seed), otherwise redundancy remains too
+  correlated under static display/capture conditions
 
 #### B. Cross-Frame Recovery Layer (Phase 4-5)
 
@@ -179,7 +215,7 @@ Detailed analysis in [protocol_efficiency_report.md](./protocol_efficiency_repor
 
 ### Phase 2: Gray4 Protocol
 
-**Status**: Next phase
+**Status**: In progress / partially validated
 
 **Goal**: Evaluate if 4-level grayscale modulation brings real throughput gains in screen capture
 
@@ -192,6 +228,11 @@ Detailed analysis in [protocol_efficiency_report.md](./protocol_efficiency_repor
 **Constraints**:
 - Keep finder/timing/locator mostly unchanged
 - Prioritize changes to: payload modulation, symbol slicing, calibration/pilot
+
+**Updated Judgment From Current Work**:
+- `gray4` has answered the payload-density question enough to continue
+- The remaining critical blocker is not "can 4-level payload work", but "can control/header remain decodable before payload under blur"
+- Therefore `gray4` SHOULD NOT absorb increasingly complex control-plane work that properly belongs to `layered`
 
 **Core Algorithm Focus**:
 
@@ -213,23 +254,30 @@ Detailed analysis in [protocol_efficiency_report.md](./protocol_efficiency_repor
    - Bad frame rate
    - Locator fail rate
    - Goodput
+   - Whether first failure is control-plane or data-plane
 
 **Recommended Implementation Order**:
 1. Keep finder/timing/header binary
 2. Only payload region enters 4-level modulation
 3. Start with global slicing
 4. Add pilot-based local slicing
-5. Finally decide if worth combining with different L/Q ECC working points
+5. Add limited header/control decode hardening only insofar as it informs later `layered` work
+6. Finally decide if worth combining with different L/Q ECC working points
 
 **Specification Boundaries** (MUST):
 1. Finder/timing/header regions stay binary
 2. Only payload region enters 4-level modulation
 3. Decoder output includes both: decision value + confidence/quality metric
 4. Benchmark results MUST report at minimum: frame success rate, bad frame rate, locator fail rate, goodput
+5. Gray4 evaluation MUST explicitly record whether the first failure mode is:
+   - control/header decode failure
+   - payload decode failure
+   - locator failure
 
 **Specification Boundaries** (SHOULD NOT):
 - Do NOT simultaneously introduce: header/data layered rewrite, new tracker, new capture backend
 - Otherwise cannot determine gain source
+- Do NOT try to solve long-term control-plane robustness purely inside `gray4` if the result effectively becomes a hidden `layered` protocol
 
 **Acceptance Criteria**:
 1. Synthetic roundtrip passes
@@ -241,20 +289,37 @@ Detailed analysis in [protocol_efficiency_report.md](./protocol_efficiency_repor
 
 **Status**: Not started
 
-**Goal**: Separate header/payload protection strength - make control plane more robust, data plane more aggressive
+**Goal**: Validate whether header/data layered design can improve both:
+- effective single-frame payload capacity
+- robustness of frame entry / control recovery
 
 **Expected Value**:
-- Header maintains high robustness
-- Payload increases density
+- Header maintains higher robustness than the main data area
+- Payload area gains effective capacity by not sharing the same protection budget as control information
+- Overall single-frame payload efficiency increases relative to non-layered layouts
 - Prepares for outer code
 
 **Key Understanding**:
 
-`layered` is NOT simply "split frame into upper/lower halves". It's about separating **control plane** vs **data plane** responsibilities.
+`layered` is NOT simply "split frame into upper/lower halves". It's about separating **control plane** vs **data plane** responsibilities so that the protocol is both:
+- more robust at frame entry and control recovery
+- more payload-efficient at the same overall screen budget
 
 **Control Plane**:
 - frame_id, session_id, generation_id, symbol type, mode/layout info
 - Requirements: high robustness, easy decision, allow lower capacity
+
+**Refined Interpretation**:
+- Control plane is not "just a small header"
+- It is the receiver's **strong synchronization and semantic lock layer**
+- It MAY consume disproportionate area, repetition, or time redundancy if that is what is required to stay alive under blur/compression
+- Its job is to let the receiver answer: "what kind of frame is this and how should I treat it?" before any aggressive payload demodulation happens
+
+**Historical Intent To Preserve**:
+- `gray4` and `layered` are both part of the single-frame capacity track
+- `gray4` asks whether denser modulation is viable
+- `layered` asks whether header/data stratification can raise effective capacity and robustness together
+- `layered` MUST NOT be reinterpreted as a robustness-only side branch
 
 **Data Plane**:
 - Actual payload symbols
@@ -276,6 +341,19 @@ Detailed analysis in [protocol_efficiency_report.md](./protocol_efficiency_repor
 - Make control plane more stable
 - Make data plane more aggressive
 - Create clearer interface for outer layer erasure recovery
+
+**Minimum Design Direction For `layered`**:
+
+`layered` SHOULD be treated as the first phase where control plane is designed explicitly as a robust channel, potentially including:
+- coarse header vs inner header split
+- larger or lower-frequency control symbols than payload symbols
+- binary-only control symbols even if payload uses gray4 or richer modulation
+- spatial repetition (for example multiple edges/rings) and/or temporal repetition across a short frame window
+- partial header recovery sufficient to classify frame type/group even when full inner metadata is unavailable
+
+**Normative Consequence**:
+- Future `layered` work MUST NOT model control fields as ordinary payload bytes with only small local protection
+- Future `layered` work SHOULD assume that preserving minimal frame identity is more important than maximizing control-plane density
 
 ### Phase 4: Erasure Coding
 
@@ -350,13 +428,16 @@ Full specification in [ogrb_specification.md](./ogrb_specification.md). Key poin
 
 If asked "what should we do now?", the answer is:
 
-1. **Enter Phase 2 (gray4)**
+1. **Finish Phase 2 only to the extent needed to validate gray4 payload viability**
 2. **Keep L-level as formal benchmark track**
 3. **Stop treating heavy frame-internal repetition as default assumption**
-4. **After single-frame layer converges, formally advance to erasure/fountain**
+4. **Advance next into explicit control/data separation (`layered`)**
+5. **Only after control-plane survivability is clear, advance to erasure/fountain**
 
 In other words, the most reasonable action sequence is:
 - Continue improving single-frame physical layer
+- Identify whether failures are control-plane or data-plane first
+- Move control-plane robustness into an explicit layered design
 - Simultaneously loosen single-frame heavy ECC assumption
 - Finally migrate primary recovery capability to cross-frame layer
 
@@ -439,8 +520,25 @@ To avoid future implementations re-coupling layers, the following boundaries are
 - Header handles control plane information
 - Payload handles data plane information
 - Future `layered` design MUST maintain this responsibility separation, not mix back into single redundancy budget
+- Header/control plane MUST be allowed to use a different survivability strategy than payload, including:
+  - lower modulation order
+  - larger symbols
+  - stronger spatial repetition
+  - stronger temporal repetition
+  - partial-decode semantics
+
+### Control Plane MUST Be Treated As Entry State
+
+- The receiver MUST be able to establish minimal frame identity before aggressive payload recovery is attempted
+- Outer recovery layers such as OGRB/fountain MUST assume a stable control/group identity layer exists
+- If a design causes control-plane failure to dominate before payload failure, that design SHOULD be considered control-limited, not payload-limited
+
+### OGRB Dependency Boundary MUST Stay Explicit
+
+- OGRB/fountain can recover missing or erased payload symbols after frame identity is established
+- OGRB/fountain MUST NOT be treated as a substitute for robust control/header decode
+- Group-stable control metadata is a prerequisite for generation-level recovery, not a consequence of it
 
 ---
 
 **End of Strategy Document**
-

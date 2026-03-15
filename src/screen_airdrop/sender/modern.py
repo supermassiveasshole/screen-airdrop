@@ -6,6 +6,7 @@ import argparse
 import sys
 
 from .controller import run_sender
+from .schedule_policy import BroadcastSchedule
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -13,7 +14,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("input_path")
     parser.add_argument("--fps", type=int, default=12, help="frames per second")
     parser.add_argument(
-        "--chunk-size", type=int, default=2048, help="chunk size in bytes (affects data capacity)"
+        "--chunk-fill-ratio",
+        type=float,
+        default=0.9,
+        help="target chunk fill as a fraction of frame capacity (0.05-1.0)",
     )
     parser.add_argument(
         "--compress", choices=["gzip", "none"], default="gzip", help="compression method"
@@ -21,7 +25,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--ecc-level",
         choices=["L", "M", "Q", "H"],
-        default="Q",
+        default=None,  # Will be set based on protocol
         help="error correction level (affects robustness)",
     )
     parser.add_argument(
@@ -30,6 +34,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--window-name", default="screen-airdrop", help="sender window title")
     parser.add_argument("--frame-width", type=int, default=1920, help="rendered frame width in pixels")
     parser.add_argument("--frame-height", type=int, default=1080, help="rendered frame height in pixels")
+    parser.add_argument(
+        "--manifest-repeat",
+        type=int,
+        default=None,
+        help="repeat the manifest chunk this many times at the start of each epoch",
+    )
     parser.add_argument(
         "--max-epochs", type=int, default=0, help="max transmission epochs (0=unlimited)"
     )
@@ -40,7 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--protocol",
-        choices=["basic", "compact"],
+        choices=["basic", "compact", "gray4"],
         default="basic",
         help="protocol name",
     )
@@ -52,16 +62,41 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    guard_band_modules = 1 if args.protocol == "compact" else 2
-    corner_size_modules = 7 if args.protocol == "compact" else 9
+
+    # Set protocol-specific defaults
+    if args.protocol == "compact":
+        guard_band_modules = 1
+        corner_size_modules = 7
+        default_ecc = "Q"
+    elif args.protocol == "gray4":
+        guard_band_modules = 1
+        corner_size_modules = 7
+        default_ecc = "L"
+    else:  # basic
+        guard_band_modules = 2
+        corner_size_modules = 9
+        default_ecc = "Q"
+    default_manifest_repeat = 8 if args.protocol == "gray4" else 5
+
+    # Use user-specified ECC level or protocol default
+    ecc_level = args.ecc_level if args.ecc_level is not None else default_ecc
+    manifest_repeat = (
+        int(args.manifest_repeat) if args.manifest_repeat is not None else default_manifest_repeat
+    )
+    schedule = BroadcastSchedule(
+        sync_frames=30,
+        control_burst_repeat=manifest_repeat,
+    )
+
     return run_sender(
         input_path=args.input_path,
         block_size=6,  # Hardcoded default
-        chunk_size=args.chunk_size,
+        chunk_size=None,
+        chunk_fill_ratio=args.chunk_fill_ratio,
         fps=args.fps,
         compress=args.compress,
-        sync_frames=30,  # Hardcoded default
-        manifest_repeat=5,  # Hardcoded default
+        sync_frames=schedule.sync_frames,
+        manifest_repeat=schedule.control_burst_repeat,
         max_epochs=args.max_epochs,
         window_name=args.window_name,
         dump_frames=args.dump_frames,
@@ -69,15 +104,16 @@ def main(argv=None):
         overlay=args.overlay,
         protocol=args.protocol,
         quiet_zone_px=48,  # Hardcoded default
-        ecc_level=args.ecc_level,
+        ecc_level=ecc_level,
         module_grid=args.module_grid,
         guard_band_modules=guard_band_modules,
         corner_size_modules=corner_size_modules,
         outer_padding_px=0,  # Hardcoded default
-        outer_padding_color="black",  # Hardcoded default (removed confusing white option)
+        outer_padding_color="black",  # Keep sender canvas consistent across protocols
         stats_interval=args.stats_interval,
         width=args.frame_width,
         height=args.frame_height,
+        schedule=schedule,
     )
 
 
