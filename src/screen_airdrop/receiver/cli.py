@@ -11,17 +11,26 @@ from typing import Any, Dict, Mapping, Optional, Tuple, cast
 
 import numpy as np
 
+from screen_airdrop.common.control_plane import (
+    control_family_for_kind,
+    control_kind_from_wire_chunk_id,
+    decode_generation_control,
+    decode_layout_bootstrap,
+    decode_session_bootstrap,
+)
 from screen_airdrop.common.protocol_basic import FRAME_DATA
 from screen_airdrop.receiver.assembler import ChunkAssembler
 from screen_airdrop.receiver.capture_mss import ScreenCapture, get_monitor_region
 from screen_airdrop.receiver.decoder_basic import decode_frame_basic
 from screen_airdrop.receiver.decoder_compact import decode_frame_compact
+from screen_airdrop.receiver.decoder_gray4 import decode_frame_gray4
 from screen_airdrop.receiver.detector_basic import _bbox_from_non_black, detect_symbol_bbox
 from screen_airdrop.receiver.frame_replay_source import FrameReplaySource
 from screen_airdrop.receiver.locator_basic import LocateError as LocateErrorV31
 from screen_airdrop.receiver.locator_basic import LocatorConfig, locate_frame
 from screen_airdrop.receiver.pipeline import ReceiverPipeline
 from screen_airdrop.receiver.restore import restore_payload
+from screen_airdrop.receiver.roi_policy import RoiPolicy
 from screen_airdrop.receiver.roi_profile import load_profile, save_profile
 from screen_airdrop.receiver.roi_selector import select_region
 from screen_airdrop.receiver.stats import TransferStats
@@ -48,7 +57,7 @@ def _parse_module_grid(raw: str) -> Tuple[int, int]:
 
 
 def _protocol_geometry(protocol: str) -> Tuple[int, int]:
-    if protocol == "compact":
+    if protocol in ("compact", "gray4"):
         return (1, 7)
     return (2, 9)
 
@@ -61,6 +70,19 @@ def _write_report(path: Optional[str], report: dict) -> None:
         os.makedirs(directory, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
+
+
+def _classify_gray4_decode_failure(decode_error: Optional[str]) -> str:
+    raw = "" if decode_error is None else str(decode_error).strip().lower()
+    if not raw:
+        return ""
+    if "payload crc mismatch" in raw or "crc mismatch" in raw:
+        return "payload"
+    if "bad v3 magic" in raw or "format parity mismatch" in raw:
+        return "header"
+    if "locator" in raw or "no_finder" in raw or "finder" in raw:
+        return "locator"
+    return "unknown"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -80,7 +102,7 @@ def build_parser() -> argparse.ArgumentParser:
     # Protocol and grid configuration (information/robustness parameters)
     parser.add_argument(
         "--protocol",
-        choices=["basic", "compact"],
+        choices=["basic", "compact", "gray4"],
         default="basic",
         help="protocol name",
     )
@@ -171,7 +193,30 @@ def build_parser() -> argparse.ArgumentParser:
         "--decode-workers",
         type=int,
         default=0,
-        help="number of parallel decode workers (0=auto: cpu_count//2, max 4)",
+        help="number of parallel decode workers (0=auto)",
+    )
+    parser.add_argument(
+        "--frame-queue-size",
+        type=int,
+        default=32,
+        help="pipeline frame queue size (screen source only)",
+    )
+    parser.add_argument(
+        "--result-queue-size",
+        type=int,
+        default=256,
+        help="pipeline result queue size (screen source only)",
+    )
+    parser.add_argument(
+        "--capture-dump-dir",
+        default=None,
+        help="dump pipeline-captured frames for later replay (screen source only)",
+    )
+    parser.add_argument(
+        "--capture-dump-max-frames",
+        type=int,
+        default=0,
+        help="max pipeline-captured frames to dump (0=disabled)",
     )
     return parser
 
@@ -334,7 +379,7 @@ def _should_use_pipeline(
 ) -> bool:
     return (
         source == "screen"
-        and protocol in ("basic", "compact")
+        and protocol in ("basic", "compact", "gray4")
         and not needs_runtime_roi_selection
         and not debug_dir
     )
@@ -394,6 +439,97 @@ def _save_debug_image(path: str, frame: np.ndarray) -> None:
     np.save(path + ".npy", frame)
 
 
+def _append_jsonl(path: str, record: Dict[str, Any]) -> None:
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+
+def _write_debug_sidecar(path: str, record: Dict[str, Any]) -> None:
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(record, f, ensure_ascii=False, indent=2)
+
+
+def _load_json_dict(path: str) -> Dict[str, Any]:
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _increment_counter(bucket: Dict[str, Any], key: str) -> None:
+    bucket[key] = int(bucket.get(key, 0)) + 1
+
+
+def _update_debug_summary(debug_dir: str, meta: Dict[str, Any]) -> None:
+    path = os.path.join(debug_dir, "summary.json")
+    summary = _load_json_dict(path)
+    summary["total_frames"] = int(summary.get("total_frames", 0)) + 1
+    planes = summary.get("planes")
+    if not isinstance(planes, dict):
+        planes = {}
+        summary["planes"] = planes
+    control_kinds = summary.get("control_kinds")
+    if not isinstance(control_kinds, dict):
+        control_kinds = {}
+        summary["control_kinds"] = control_kinds
+    protocols = summary.get("protocol_paths")
+    if not isinstance(protocols, dict):
+        protocols = {}
+        summary["protocol_paths"] = protocols
+
+    plane = str(meta.get("decoded_plane", "unknown") or "unknown")
+    _increment_counter(planes, plane)
+    _increment_counter(protocols, str(meta.get("protocol_path_used", "unknown") or "unknown"))
+    control_kind = str(meta.get("decoded_control_kind", "") or "")
+    if control_kind:
+        _increment_counter(control_kinds, control_kind)
+
+    _write_debug_sidecar(path, summary)
+
+
+def _record_debug_indexes(debug_dir: str, frame_index: int, meta: Dict[str, Any]) -> None:
+    frame_base = "frame_{0:05d}".format(frame_index)
+    plane = str(meta.get("decoded_plane", "unknown") or "unknown")
+    control_kind = str(meta.get("decoded_control_kind", "") or "")
+    control_family = str(meta.get("decoded_control_family", "") or "")
+    record = {
+        "frame_index": int(frame_index),
+        "plane": plane,
+        "control_family": control_family,
+        "control_kind": control_kind,
+        "protocol_path_used": str(meta.get("protocol_path_used", "")),
+        "decode_error": str(meta.get("decode_error", "")),
+        "frame_json": frame_base + ".json",
+        "frame_dir": frame_base,
+    }
+    _append_jsonl(os.path.join(debug_dir, "index_all.jsonl"), record)
+    _append_jsonl(os.path.join(debug_dir, "by_plane", plane, "index.jsonl"), record)
+    _write_debug_sidecar(
+        os.path.join(debug_dir, "by_plane", plane, frame_base + ".json"),
+        record,
+    )
+    if control_kind:
+        _append_jsonl(
+            os.path.join(debug_dir, "by_control_kind", control_kind, "index.jsonl"),
+            record,
+        )
+        _write_debug_sidecar(
+            os.path.join(debug_dir, "by_control_kind", control_kind, frame_base + ".json"),
+            record,
+        )
+    _update_debug_summary(debug_dir, meta)
+
+
 def _init_debug_meta(
     frame: np.ndarray,
     frame_index: int,
@@ -437,6 +573,11 @@ def _init_debug_meta(
         "legacy_elapsed_ms": 0.0,
         "new_fail_reason": "",
         "new_elapsed_ms": 0.0,
+        "gray4_failure_class": _classify_gray4_decode_failure(decode_error),
+        "gray4_mask_id": -1,
+        "gray4_avg_symbol_confidence": 0.0,
+        "gray4_payload_low_conf_symbols": 0,
+        "gray4_payload_variant_attempts": 0,
     }
 
 
@@ -452,6 +593,16 @@ def _apply_v31_meta_to_debug(
     meta["confidence"] = float(getattr(v31_meta, "confidence", 0.0))
     meta["fail_reason"] = getattr(v31_meta, "fail_reason", "")
     meta["elapsed_ms"] = float(getattr(v31_meta, "elapsed_ms", 0.0))
+    meta["gray4_mask_id"] = int(getattr(v31_meta, "mask_id", -1))
+    meta["gray4_avg_symbol_confidence"] = float(
+        getattr(v31_meta, "avg_symbol_confidence", 0.0)
+    )
+    meta["gray4_payload_low_conf_symbols"] = int(
+        getattr(v31_meta, "payload_low_conf_symbols", 0)
+    )
+    meta["gray4_payload_variant_attempts"] = int(
+        getattr(v31_meta, "payload_variant_attempts", 0)
+    )
     locator_debug = getattr(v31_meta, "locator_debug_artifacts", None)
     if isinstance(locator_debug, dict):
         if (
@@ -586,6 +737,13 @@ def _dump_debug_snapshot(
     grid_w: int = 160,
     grid_h: int = 96,
     locator_confidence_threshold: float = 0.55,
+    control_plane_kinds: Optional[list[str]] = None,
+    control_session: Optional[Dict[str, object]] = None,
+    control_layout: Optional[Dict[str, object]] = None,
+    control_generation: Optional[Dict[str, object]] = None,
+    control_generations_seen: Optional[list[int]] = None,
+    decoded_chunk_id: Optional[int] = None,
+    decoded_payload: Optional[bytes] = None,
 ) -> None:
     os.makedirs(debug_dir, exist_ok=True)
     raw = frame.copy()
@@ -606,6 +764,34 @@ def _dump_debug_snapshot(
         fallback_hits=fallback_hits,
     )
     locator_debug: Dict[str, Any] = {}
+    meta["control_plane_kinds"] = [] if control_plane_kinds is None else list(control_plane_kinds)
+    meta["control_session"] = None if control_session is None else dict(control_session)
+    meta["control_layout"] = None if control_layout is None else dict(control_layout)
+    meta["control_generation"] = None if control_generation is None else dict(control_generation)
+    meta["control_generations_seen"] = (
+        [] if control_generations_seen is None else [int(v) for v in control_generations_seen]
+    )
+    meta["decoded_plane"] = "unknown"
+    meta["decoded_control_family"] = ""
+    meta["decoded_control_kind"] = ""
+    if decoded_chunk_id is not None:
+        meta["decoded_chunk_id"] = int(decoded_chunk_id)
+        control_kind = control_kind_from_wire_chunk_id(decoded_chunk_id)
+        if control_kind is not None:
+            meta["decoded_plane"] = "control"
+            meta["decoded_control_family"] = control_family_for_kind(control_kind)
+            meta["decoded_control_kind"] = control_kind
+            try:
+                if decoded_payload is not None and control_kind == "session":
+                    meta["decoded_control_payload"] = decode_session_bootstrap(decoded_payload)
+                elif decoded_payload is not None and control_kind == "layout":
+                    meta["decoded_control_payload"] = decode_layout_bootstrap(decoded_payload)
+                elif decoded_payload is not None and control_kind == "generation":
+                    meta["decoded_control_payload"] = decode_generation_control(decoded_payload)
+            except Exception:
+                meta["decoded_control_payload"] = {"decode_error": "control_payload_parse_failed"}
+        elif int(decoded_chunk_id) > 0:
+            meta["decoded_plane"] = "data"
     if v31_meta is not None:
         locator_debug = _apply_v31_meta_to_debug(meta=meta, v31_meta=v31_meta)
     elif protocol_path_used == "basic":
@@ -718,6 +904,7 @@ def _dump_debug_snapshot(
     _save_debug_image(stem + ".png", canvas)
     with open(stem + ".json", "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
+    _record_debug_indexes(debug_dir=debug_dir, frame_index=frame_index, meta=meta)
 
     # Protocol-standard debug artifact set.
     frame_dir = os.path.join(debug_dir, "frame_{0:05d}".format(frame_index))
@@ -859,14 +1046,13 @@ def _maybe_dump_debug_snapshot(
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    if args.roi_interactive:
-        args.select_region = True
-        args.roi_mode = "manual"
+    roi_policy = RoiPolicy.from_args(args)
+    roi_policy.apply_to_args(args)
     if args.source == "screen" and args.window_title and not (args.roi or args.region):
         print(
             "warning: --window-title is currently not used for real window lookup; "
             "capture will fallback to full monitor. "
-            "Use --roi x,y,w,h or --select-region for reliable decode."
+            "Use --roi x,y,w,h or --roi-interactive for reliable decode."
         )
 
     if args.block_size == "auto":
@@ -892,16 +1078,16 @@ def main(argv=None):
     if forced_roi is not None:
         forced_roi = _ensure_roi_valid(forced_roi)
 
-    if args.roi_mode == "manual" and forced_roi is None and not args.select_region:
-        raise ValueError("manual roi-mode requires --roi/--roi-profile or --select-region")
+    if roi_policy.requires_manual_roi(forced_roi=forced_roi):
+        raise ValueError("manual roi-mode requires --roi/--roi-profile or --roi-interactive")
 
     stats = TransferStats()
-    stats.set_roi_mode(args.roi_mode)
+    stats.set_roi_mode(roi_policy.report_mode)
     if (
         args.source == "screen"
-        and args.roi_mode == "manual"
+        and roi_policy.mode == "manual"
         and forced_roi is None
-        and args.select_region
+        and roi_policy.interactive
     ):
         stats.mark_manual_select_attempt()
         selected = select_region(get_monitor_region(args.monitor_index))
@@ -940,6 +1126,16 @@ def main(argv=None):
     debug_next_ts = start
     debug_written = 0
     last_decode_error = None  # type: Optional[str]
+    last_gray4_failure_error = None  # type: Optional[str]
+    last_gray4_failure_class = ""
+    gray4_failure_counts = {"header": 0, "payload": 0, "locator": 0, "unknown": 0}
+    first_valid_frame_ts = None  # type: Optional[float]
+    first_data_frame_ts = None  # type: Optional[float]
+    first_new_chunk_ts = None  # type: Optional[float]
+    startup_sync_frames_decoded = 0
+    startup_control_frames_decoded = 0
+    decoded_new_chunks = 0
+    decoded_duplicate_chunks = 0
     last_v3_meta = None
     last_v31_meta = None
     protocol_path_used = args.protocol
@@ -980,6 +1176,39 @@ def main(argv=None):
         report["legacy_used"] = 1.0 if locator_legacy_used else 0.0
         report["legacy_elapsed_ms"] = float(locator_legacy_elapsed_ms)
 
+    def _attach_gray4_state(
+        report: Dict[str, object],
+        *,
+        failure_error: Optional[str],
+        failure_class: str,
+        success_meta: Optional[object],
+        failure_counts: Optional[Mapping[str, object]] = None,
+    ) -> None:
+        if args.protocol != "gray4":
+            return
+        report["gray4_last_failure_error"] = "" if failure_error is None else str(failure_error)
+        report["gray4_last_failure_class"] = str(failure_class or "")
+        if failure_counts is not None:
+            report["gray4_failure_counts"] = {
+                "header": int(failure_counts.get("header", 0) or 0),
+                "payload": int(failure_counts.get("payload", 0) or 0),
+                "locator": int(failure_counts.get("locator", 0) or 0),
+                "unknown": int(failure_counts.get("unknown", 0) or 0),
+            }
+        if success_meta is None:
+            return
+        report["gray4_last_mask_id"] = float(getattr(success_meta, "mask_id", -1))
+        report["gray4_avg_symbol_confidence"] = float(
+            getattr(success_meta, "avg_symbol_confidence", 0.0)
+        )
+        report["gray4_total_decode_ms"] = float(getattr(success_meta, "total_decode_ms", 0.0))
+        report["gray4_payload_low_conf_symbols"] = float(
+            getattr(success_meta, "payload_low_conf_symbols", 0)
+        )
+        report["gray4_payload_variant_attempts"] = float(
+            getattr(success_meta, "payload_variant_attempts", 0)
+        )
+
     def _sync_transfer_stats_from_pipeline(snap: Mapping[str, int | float]) -> None:
         stats.total_frames = int(snap.get("captured", 0))
         stats.valid_frames = int(snap.get("decode_ok", 0))
@@ -1005,13 +1234,72 @@ def main(argv=None):
         report["pipeline_capture_grab_ops"] = float(snap.get("capture_grab_ops", 0))
         report["pipeline_capture_copy_ops"] = float(snap.get("capture_copy_ops", 0))
         report["pipeline_capture_dedup_ops"] = float(snap.get("capture_dedup_ops", 0))
+        report["time_to_first_valid_frame_s"] = float(snap.get("time_to_first_valid_frame_s", 0.0))
+        report["time_to_first_data_frame_s"] = float(snap.get("time_to_first_data_frame_s", 0.0))
+        report["time_to_first_new_chunk_s"] = float(snap.get("time_to_first_new_chunk_s", 0.0))
+        report["startup_sync_frames_decoded"] = float(snap.get("startup_sync_frames_decoded", 0))
+        report["startup_control_frames_decoded"] = float(
+            snap.get("startup_control_frames_decoded", 0)
+        )
+        report["decoded_new_chunks"] = float(snap.get("decoded_new_chunks", 0))
+        report["decoded_duplicate_chunks"] = float(snap.get("decoded_duplicate_chunks", 0))
+        report["lock_state_transitions"] = {
+            "acquire_to_locked": int(snap.get("lock_acquire_to_locked", 0) or 0),
+            "locked_to_acquire": int(snap.get("lock_locked_to_acquire", 0) or 0),
+        }
+        report["locked_decode_fail_streak_max"] = float(
+            snap.get("locked_decode_fail_streak_max", 0)
+        )
+
+    def _attach_control_plane_state(report: Dict[str, object]) -> None:
+        report["control_plane_kinds"] = sorted(list(assembler.control_items.keys()))
+        if assembler.session_info is not None:
+            report["control_session"] = dict(assembler.session_info)
+        if assembler.layout_info is not None:
+            report["control_layout"] = dict(assembler.layout_info)
+        if assembler.generation_info is not None:
+            report["control_generation"] = dict(assembler.generation_info)
+        if assembler.generations:
+            report["control_generations_seen"] = sorted(int(k) for k in assembler.generations.keys())
+
+    def _attach_missing_chunks_state(report: Dict[str, object]) -> None:
+        missing_count = assembler.missing_count()
+        if missing_count is None:
+            return
+        report["missing_chunks"] = int(missing_count)
+        report["missing_chunk_ids"] = list(assembler.missing_chunk_ids())
+
+    def _debug_control_plane_state() -> Dict[str, object]:
+        state: Dict[str, object] = {
+            "control_plane_kinds": sorted(list(assembler.control_items.keys())),
+            "control_session": None if assembler.session_info is None else dict(assembler.session_info),
+            "control_layout": None if assembler.layout_info is None else dict(assembler.layout_info),
+            "control_generation": (
+                None if assembler.generation_info is None else dict(assembler.generation_info)
+            ),
+            "control_generations_seen": sorted(int(k) for k in assembler.generations.keys()),
+        }
+        return state
+
+    def _attach_startup_state(report: Dict[str, object]) -> None:
+        report["time_to_first_valid_frame_s"] = (
+            0.0 if first_valid_frame_ts is None else max(0.0, first_valid_frame_ts - start)
+        )
+        report["time_to_first_data_frame_s"] = (
+            0.0 if first_data_frame_ts is None else max(0.0, first_data_frame_ts - start)
+        )
+        report["time_to_first_new_chunk_s"] = (
+            0.0 if first_new_chunk_ts is None else max(0.0, first_new_chunk_ts - start)
+        )
+        report["startup_sync_frames_decoded"] = float(startup_sync_frames_decoded)
+        report["startup_control_frames_decoded"] = float(startup_control_frames_decoded)
+        report["decoded_new_chunks"] = float(decoded_new_chunks)
+        report["decoded_duplicate_chunks"] = float(decoded_duplicate_chunks)
 
     # ── Pipeline mode: screen source + basic protocol ──────────────────────────
-    needs_runtime_roi_selection = (
-        args.source == "screen"
-        and args.roi_mode == "auto_then_manual"
-        and args.select_region
-        and forced_roi is None
+    needs_runtime_roi_selection = roi_policy.needs_runtime_selection(
+        source=args.source,
+        forced_roi=forced_roi,
     )
     use_pipeline = _should_use_pipeline(
         source=args.source,
@@ -1035,6 +1323,10 @@ def main(argv=None):
             assembler=assembler,
             num_workers=num_workers,
             capture_fps=args.capture_fps,
+            frame_queue_size=args.frame_queue_size,
+            result_queue_size=args.result_queue_size,
+            capture_dump_dir=args.capture_dump_dir,
+            capture_dump_max_frames=args.capture_dump_max_frames,
             protocol=args.protocol,  # NEW: pass protocol
             grid_w=grid_w,
             grid_h=grid_h,
@@ -1081,6 +1373,20 @@ def main(argv=None):
                         Dict[str, object], dict(stats.finalize(output_size_bytes=0, ts=now))
                     )
                     _attach_pipeline_metrics(final_report, snap)
+                    _attach_control_plane_state(final_report)
+                    _attach_missing_chunks_state(final_report)
+                    _attach_gray4_state(
+                        final_report,
+                        failure_error=str(snap.get("last_decode_error", "") or ""),
+                        failure_class=str(snap.get("last_failure_class", "") or ""),
+                        success_meta=last_v31_meta,
+                        failure_counts={
+                            "header": snap.get("failure_count_header", 0),
+                            "payload": snap.get("failure_count_payload", 0),
+                            "locator": snap.get("failure_count_locator", 0),
+                            "unknown": snap.get("failure_count_unknown", 0),
+                        },
+                    )
                     final_report["status"] = "timeout_max_seconds"
                     _write_report(args.report_json, final_report)
                     print("receiver timeout: max-seconds reached")
@@ -1097,6 +1403,20 @@ def main(argv=None):
                         Dict[str, object], dict(stats.finalize(output_size_bytes=0, ts=now))
                     )
                     _attach_pipeline_metrics(final_report, snap)
+                    _attach_control_plane_state(final_report)
+                    _attach_missing_chunks_state(final_report)
+                    _attach_gray4_state(
+                        final_report,
+                        failure_error=str(snap.get("last_decode_error", "") or ""),
+                        failure_class=str(snap.get("last_failure_class", "") or ""),
+                        success_meta=last_v31_meta,
+                        failure_counts={
+                            "header": snap.get("failure_count_header", 0),
+                            "payload": snap.get("failure_count_payload", 0),
+                            "locator": snap.get("failure_count_locator", 0),
+                            "unknown": snap.get("failure_count_unknown", 0),
+                        },
+                    )
                     final_report["status"] = "timeout_idle"
                     _write_report(args.report_json, final_report)
                     print("receiver timeout: no new chunks for {0}s".format(args.max_idle_seconds))
@@ -1107,6 +1427,20 @@ def main(argv=None):
                         Dict[str, object], dict(stats.finalize(output_size_bytes=0, ts=now))
                     )
                     _attach_pipeline_metrics(final_report, snap)
+                    _attach_control_plane_state(final_report)
+                    _attach_missing_chunks_state(final_report)
+                    _attach_gray4_state(
+                        final_report,
+                        failure_error=str(snap.get("last_decode_error", "") or ""),
+                        failure_class=str(snap.get("last_failure_class", "") or ""),
+                        success_meta=last_v31_meta,
+                        failure_counts={
+                            "header": snap.get("failure_count_header", 0),
+                            "payload": snap.get("failure_count_payload", 0),
+                            "locator": snap.get("failure_count_locator", 0),
+                            "unknown": snap.get("failure_count_unknown", 0),
+                        },
+                    )
                     final_report["status"] = "timeout_idle"
                     _write_report(args.report_json, final_report)
                     print(
@@ -1202,6 +1536,20 @@ def main(argv=None):
                 dict(stats.finalize(output_size_bytes=len(payload_bytes), ts=now)),
             )
             _attach_pipeline_metrics(final_report, snap)
+            _attach_control_plane_state(final_report)
+            _attach_missing_chunks_state(final_report)
+            _attach_gray4_state(
+                final_report,
+                failure_error=str(snap.get("last_decode_error", "") or ""),
+                failure_class=str(snap.get("last_failure_class", "") or ""),
+                success_meta=last_v31_meta,
+                failure_counts={
+                    "header": snap.get("failure_count_header", 0),
+                    "payload": snap.get("failure_count_payload", 0),
+                    "locator": snap.get("failure_count_locator", 0),
+                    "unknown": snap.get("failure_count_unknown", 0),
+                },
+            )
             final_report["status"] = "ok"
             final_report["output_path"] = output_path
             _write_report(args.report_json, final_report)
@@ -1227,6 +1575,19 @@ def main(argv=None):
                     Dict[str, object], dict(stats.finalize(output_size_bytes=0, ts=time.time()))
                 )
                 _attach_pipeline_metrics(report, snap)
+                _attach_control_plane_state(report)
+                _attach_gray4_state(
+                    report,
+                    failure_error=str(snap.get("last_decode_error", "") or ""),
+                    failure_class=str(snap.get("last_failure_class", "") or ""),
+                    success_meta=last_v31_meta,
+                    failure_counts={
+                        "header": snap.get("failure_count_header", 0),
+                        "payload": snap.get("failure_count_payload", 0),
+                        "locator": snap.get("failure_count_locator", 0),
+                        "unknown": snap.get("failure_count_unknown", 0),
+                    },
+                )
                 report["status"] = "aborted"
                 _write_report(args.report_json, report)
         return 1
@@ -1239,9 +1600,9 @@ def main(argv=None):
             frame_v31_meta = None
             capture_region = getattr(source, "active_region", None)
             forced_roi_local = _roi_abs_to_local(forced_roi, capture_region, frame.shape)
-            manual_mode_now = args.roi_mode == "manual" or stats.manual_roi_applied
+            manual_mode_now = roi_policy.manual_active(stats)
             manual_decode_roi_local = (
-                _expand_roi_local(forced_roi_local, frame.shape, args.manual_roi_pad_px)
+                _expand_roi_local(forced_roi_local, frame.shape, roi_policy.pad_px)
                 if manual_mode_now
                 else forced_roi_local
             )
@@ -1259,6 +1620,7 @@ def main(argv=None):
                 )
                 final_report["status"] = "timeout_max_seconds"
                 _attach_v3_metrics(final_report)
+                _attach_missing_chunks_state(final_report)
                 _write_report(args.report_json, final_report)
                 print("receiver timeout: max-seconds reached")
                 return 2
@@ -1269,6 +1631,7 @@ def main(argv=None):
                 )
                 final_report["status"] = "timeout_idle"
                 _attach_v3_metrics(final_report)
+                _attach_missing_chunks_state(final_report)
                 _write_report(args.report_json, final_report)
                 print("receiver timeout: no valid frames for {0}s".format(args.max_idle_seconds))
                 return 2
@@ -1279,7 +1642,7 @@ def main(argv=None):
                 print("using default threshold={0}".format(threshold))
 
             # manual mode selector on first frame if no roi yet.
-            if args.roi_mode == "manual" and forced_roi is None and args.select_region:
+            if roi_policy.mode == "manual" and forced_roi is None and roi_policy.interactive:
                 stats.mark_manual_select_attempt()
                 selected = select_region(get_monitor_region(args.monitor_index))
                 if selected is None:
@@ -1287,7 +1650,7 @@ def main(argv=None):
                 forced_roi = _ensure_roi_valid(selected)
                 forced_roi_local = _roi_abs_to_local(forced_roi, capture_region, frame.shape)
                 manual_decode_roi_local = _expand_roi_local(
-                    forced_roi_local, frame.shape, args.manual_roi_pad_px
+                    forced_roi_local, frame.shape, roi_policy.pad_px
                 )
                 v3_track_roi = manual_decode_roi_local
                 stats.mark_manual_roi(switched=False)
@@ -1296,7 +1659,7 @@ def main(argv=None):
 
             try:
                 t_decode0 = time.perf_counter()
-                if args.protocol in ("basic", "compact"):
+                if args.protocol in ("basic", "compact", "gray4"):
                     last_grid_exc = None
                     if replay_mode:
                         v31_mode = "full"
@@ -1306,13 +1669,12 @@ def main(argv=None):
                             if v3_track_roi is not None
                             else ("full" if v3_mode == "full" else "track")
                         )
-                    manual_strict = manual_decode_roi_local is not None and (
-                        args.roi_mode == "manual" or stats.manual_roi_applied
+                    manual_strict = manual_decode_roi_local is not None and roi_policy.manual_active(
+                        stats
                     )
-                    roi_only = manual_decode_roi_local is not None and (
-                        args.roi_mode == "manual" or stats.manual_roi_applied
-                    )
+                    roi_only = manual_strict
                     decode_fn = (
+                        decode_frame_gray4 if args.protocol == "gray4" else
                         decode_frame_compact if args.protocol == "compact" else decode_frame_basic
                     )
                     guard_band, corner_size = _protocol_geometry(args.protocol)
@@ -1394,10 +1756,15 @@ def main(argv=None):
                         v3_mode = "track"
                 else:
                     raise ValueError(
-                        f"Protocol '{args.protocol}' not supported, use 'basic' or 'compact'"
+                        f"Protocol '{args.protocol}' not supported, use 'basic', 'compact', or 'gray4'"
                     )
                 auto_fail_count = 0
                 last_decode_error = None
+                if args.protocol == "gray4":
+                    last_gray4_failure_error = None
+                    last_gray4_failure_class = ""
+                if first_valid_frame_ts is None:
+                    first_valid_frame_ts = now
                 decode_time_sum += max(0.0, time.perf_counter() - t_decode0)
                 decode_time_count += 1
             except Exception as exc:
@@ -1405,8 +1772,8 @@ def main(argv=None):
                 decode_time_count += 1
                 decoded = False
                 last_exc = exc
-                manual_strict = manual_decode_roi_local is not None and (
-                    args.roi_mode == "manual" or stats.manual_roi_applied
+                manual_strict = manual_decode_roi_local is not None and roi_policy.manual_active(
+                    stats
                 )
                 if (
                     not decoded
@@ -1422,6 +1789,13 @@ def main(argv=None):
                     pass
                 else:
                     last_decode_error = str(last_exc)
+                    if args.protocol == "gray4":
+                        last_gray4_failure_error = last_decode_error
+                        last_gray4_failure_class = _classify_gray4_decode_failure(last_decode_error)
+                        if last_gray4_failure_class in gray4_failure_counts:
+                            gray4_failure_counts[last_gray4_failure_class] += 1
+                        elif last_gray4_failure_class:
+                            gray4_failure_counts["unknown"] += 1
                     if args.protocol in ("basic", "compact"):
                         v3_fail_streak += 1
                         # Fast recovery: return to full search after a few consecutive misses.
@@ -1433,11 +1807,11 @@ def main(argv=None):
                         stats.on_locator(confidence=0.0, failed=True)
                         auto_fail_count += 1
                     if (
-                        args.roi_mode == "auto_then_manual"
-                        and args.select_region
+                        roi_policy.mode == "auto_then_manual"
+                        and roi_policy.interactive
                         and forced_roi is None
-                        and auto_fail_count >= args.auto_fail_threshold
-                        and manual_attempts < args.manual_max_retries
+                        and auto_fail_count >= roi_policy.auto_fail_threshold
+                        and manual_attempts < roi_policy.manual_max_retries
                     ):
                         manual_attempts += 1
                         stats.mark_manual_select_attempt()
@@ -1454,7 +1828,7 @@ def main(argv=None):
                                 forced_roi, capture_region, frame.shape
                             )
                             manual_decode_roi_local = _expand_roi_local(
-                                forced_roi_local, frame.shape, args.manual_roi_pad_px
+                                forced_roi_local, frame.shape, roi_policy.pad_px
                             )
                             v3_track_roi = manual_decode_roi_local
                             auto_fail_count = 0
@@ -1489,13 +1863,12 @@ def main(argv=None):
                                 "det_confidence": last_det_confidence,
                                 "decode_attempt_total": decode_attempt_total,
                                 "fallback_hits": fallback_hits,
-                                "manual_strict": (
-                                    args.roi_mode == "manual" or stats.manual_roi_applied
-                                ),
+                                "manual_strict": roi_policy.manual_active(stats),
                                 "v31_meta": frame_v31_meta,
                                 "grid_w": grid_w,
                                 "grid_h": grid_h,
                                 "locator_confidence_threshold": args.locator_confidence_threshold,
+                                **_debug_control_plane_state(),
                             },
                         )
                     )
@@ -1527,11 +1900,14 @@ def main(argv=None):
                         "det_confidence": last_det_confidence,
                         "decode_attempt_total": decode_attempt_total,
                         "fallback_hits": fallback_hits,
-                        "manual_strict": (args.roi_mode == "manual" or stats.manual_roi_applied),
+                        "manual_strict": roi_policy.manual_active(stats),
                         "v31_meta": frame_v31_meta,
                         "grid_w": grid_w,
                         "grid_h": grid_h,
                         "locator_confidence_threshold": args.locator_confidence_threshold,
+                        **_debug_control_plane_state(),
+                        "decoded_chunk_id": int(header.chunk_id),
+                        "decoded_payload": payload,
                     },
                 )
             )
@@ -1539,6 +1915,8 @@ def main(argv=None):
             is_data_frame = int(header.frame_type) == int(FRAME_DATA)
 
             if not is_data_frame:
+                if first_new_chunk_ts is None:
+                    startup_sync_frames_decoded += 1
                 stats.on_frame(decoded_ok=True, payload_len=0, ts=now)
                 if now >= next_stats_ts:
                     _print_stats(stats.snapshot(ts=now), assembler.missing_count())
@@ -1546,8 +1924,23 @@ def main(argv=None):
                 continue
 
             last_good = now
+            if first_data_frame_ts is None:
+                first_data_frame_ts = now
             stats.on_frame(decoded_ok=True, payload_len=len(payload), ts=now)
-            assembler.add(header.chunk_id, payload)
+            control_kind = control_kind_from_wire_chunk_id(int(header.chunk_id))
+            if control_kind is not None:
+                if first_new_chunk_ts is None:
+                    startup_control_frames_decoded += 1
+                assembler.add_control(control_kind, payload)
+            else:
+                is_new_chunk = int(header.chunk_id) not in assembler.chunks
+                assembler.add(header.chunk_id, payload)
+                if is_new_chunk:
+                    decoded_new_chunks += 1
+                    if first_new_chunk_ts is None:
+                        first_new_chunk_ts = now
+                else:
+                    decoded_duplicate_chunks += 1
 
             if now >= next_stats_ts:
                 _print_stats(stats.snapshot(ts=now), assembler.missing_count())
@@ -1565,6 +1958,13 @@ def main(argv=None):
                 final_report["status"] = "ok"
                 final_report["output_path"] = output_path
                 _attach_v3_metrics(final_report)
+                _attach_gray4_state(
+                    final_report,
+                    failure_error=last_gray4_failure_error,
+                    failure_class=last_gray4_failure_class,
+                    success_meta=last_v31_meta,
+                    failure_counts=gray4_failure_counts,
+                )
                 if last_v3_meta is not None:
                     final_report["protocol_version_used"] = float(last_v3_meta.protocol_version_used)
                     final_report["det_confidence"] = float(last_v3_meta.det_confidence)
@@ -1586,13 +1986,28 @@ def main(argv=None):
                     final_report["locator_engine"] = last_v31_meta.locator_engine
                     final_report["locator_fail_reason"] = last_v31_meta.fail_reason
                     final_report["locator_elapsed_ms"] = float(last_v31_meta.elapsed_ms)
+                    final_report["gray4_total_decode_ms"] = float(
+                        getattr(last_v31_meta, "total_decode_ms", 0.0)
+                    )
+                    final_report["gray4_phase_candidates_tried"] = float(
+                        getattr(last_v31_meta, "phase_candidates_tried", 0)
+                    )
+                    final_report["gray4_phase_sweep_used"] = 1.0 if bool(
+                        getattr(last_v31_meta, "phase_sweep_used", False)
+                    ) else 0.0
+                    final_report["gray4_avg_symbol_confidence"] = float(
+                        getattr(last_v31_meta, "avg_symbol_confidence", 0.0)
+                    )
                     final_report["legacy_used"] = 1.0 if last_v31_meta.legacy_used else 0.0
                     final_report["new_fail_reason"] = last_v31_meta.new_fail_reason
                     final_report["new_elapsed_ms"] = float(last_v31_meta.new_elapsed_ms)
                     final_report["legacy_elapsed_ms"] = float(last_v31_meta.legacy_elapsed_ms)
                 else:
                     final_report["protocol_version_used"] = 3.1
-                final_report["roi_mode_used"] = args.roi_mode
+                final_report["roi_mode_used"] = roi_policy.report_mode
+                _attach_control_plane_state(final_report)
+                _attach_missing_chunks_state(final_report)
+                _attach_startup_state(final_report)
                 if forced_roi is not None:
                     final_report["roi"] = {
                         "x": forced_roi[0],
@@ -1625,6 +2040,16 @@ def main(argv=None):
         )
         final_report["status"] = "source_exhausted"
         _attach_v3_metrics(final_report)
+        _attach_control_plane_state(final_report)
+        _attach_missing_chunks_state(final_report)
+        _attach_startup_state(final_report)
+        _attach_gray4_state(
+            final_report,
+            failure_error=last_gray4_failure_error,
+            failure_class=last_gray4_failure_class,
+            success_meta=last_v31_meta,
+            failure_counts=gray4_failure_counts,
+        )
         _write_report(args.report_json, final_report)
         print("receiver ended: source exhausted")
         return 1
@@ -1635,6 +2060,15 @@ def main(argv=None):
             )
             report["status"] = "aborted"
             _attach_v3_metrics(report)
+            _attach_control_plane_state(report)
+            _attach_startup_state(report)
+            _attach_gray4_state(
+                report,
+                failure_error=last_gray4_failure_error,
+                failure_class=last_gray4_failure_class,
+                success_meta=last_v31_meta,
+                failure_counts=gray4_failure_counts,
+            )
             _write_report(args.report_json, report)
 
 

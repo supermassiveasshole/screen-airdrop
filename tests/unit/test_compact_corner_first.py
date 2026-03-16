@@ -1,7 +1,6 @@
 """Test compact protocol corner-first detection with cropped frames."""
 
 import numpy as np
-import pytest
 
 from screen_airdrop.common.protocol_basic import FRAME_DATA, FrameHeaderBasic
 from screen_airdrop.receiver.protocol_adapter_compact import CompactProtocolDecoder

@@ -40,7 +40,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Synthetic CPU microbenchmark for encode/decode only."
     )
-    parser.add_argument("--protocol", choices=["basic", "compact", "all"], default="all")
+    parser.add_argument("--protocol", choices=["basic", "compact", "gray4", "all"], default="all")
     parser.add_argument("--layout-mode", choices=list(LAYOUT_MODES), default="same_grid")
     parser.add_argument("--ecc", choices=["all", *ECC_LEVELS], default="Q")
     parser.add_argument("--payload-mode", choices=list(PAYLOAD_MODES), default="fixed")

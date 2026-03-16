@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Generator
 
 import numpy as np
@@ -11,6 +12,20 @@ import numpy as np
 class FrameReplaySource(object):
     def __init__(self, frames_dir: str):
         self.frames_dir = frames_dir
+
+    @staticmethod
+    def _sort_key(name: str):
+        low = name.lower()
+        numeric_match = re.match(r"^(\d+)\.(npy|png)$", low)
+        if numeric_match is not None:
+            return (0, int(numeric_match.group(1)), low)
+        sync_match = re.match(r"^sync_(\d+)\.(npy|png)$", low)
+        if sync_match is not None:
+            return (1, int(sync_match.group(1)), low)
+        epoch_match = re.match(r"^epoch_(\d+)_frame_(\d+)\.(npy|png)$", low)
+        if epoch_match is not None:
+            return (2, int(epoch_match.group(1)), int(epoch_match.group(2)), low)
+        return (3, low)
 
     def iter_frames(self) -> Generator[np.ndarray, None, None]:
         if not os.path.isdir(self.frames_dir):
@@ -21,7 +36,7 @@ class FrameReplaySource(object):
             low = name.lower()
             if low.endswith(".npy") or low.endswith(".png"):
                 files.append(name)
-        files.sort()
+        files.sort(key=self._sort_key)
         if not files:
             raise RuntimeError("no replay frames in: {0}".format(self.frames_dir))
 

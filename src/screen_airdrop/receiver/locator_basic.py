@@ -16,8 +16,7 @@ from screen_airdrop.common.layout_basic import (
     DEFAULT_GRID_W,
     DEFAULT_GUARD,
 )
-from screen_airdrop.receiver.detector_basic import detect_symbol_quad
-from screen_airdrop.receiver.detector_basic import detect_symbol_bbox
+from screen_airdrop.receiver.detector_basic import detect_symbol_bbox, detect_symbol_quad
 from screen_airdrop.sender.encoder_basic import BasicLayout, build_layout_basic
 
 

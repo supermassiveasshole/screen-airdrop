@@ -41,6 +41,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="repeat the manifest chunk this many times at the start of each epoch",
     )
     parser.add_argument(
+        "--data-realizations",
+        type=int,
+        default=None,
+        help="send each data chunk this many distinct times per epoch",
+    )
+    parser.add_argument(
         "--max-epochs", type=int, default=0, help="max transmission epochs (0=unlimited)"
     )
     parser.add_argument("--dump-frames", default=None, help="directory to dump frame images")
@@ -83,9 +89,11 @@ def main(argv=None):
     manifest_repeat = (
         int(args.manifest_repeat) if args.manifest_repeat is not None else default_manifest_repeat
     )
+    data_realizations = int(args.data_realizations) if args.data_realizations is not None else 1
     schedule = BroadcastSchedule(
-        sync_frames=30,
+        sync_frames=8,
         control_burst_repeat=manifest_repeat,
+        data_realizations=data_realizations,
     )
 
     return run_sender(

@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Tuple
 
-import cv2
 import numpy as np
 
 from screen_airdrop.common.layout_compact import (
@@ -232,7 +231,7 @@ def _render_modules(
     outer_padding_px: int = 0,
     outer_padding_white: bool = False,
 ) -> np.ndarray:
-    """Render module matrix to BGR image (reused from basic)."""
+    """Render module matrix to BGR image (uniform integer module pitch)."""
     mh, mw = modules.shape
     pad = max(0, int(outer_padding_px))
     avail_w = max(1, width - 2 * pad)
@@ -240,9 +239,7 @@ def _render_modules(
     scale = max(1, min(avail_w // mw, avail_h // mh))
     sym_w = mw * scale
     sym_h = mh * scale
-    symbol = cv2.resize(
-        (modules * 255).astype(np.uint8), (sym_w, sym_h), interpolation=cv2.INTER_NEAREST
-    )
+    symbol = np.repeat(np.repeat((modules * 255).astype(np.uint8), scale, axis=0), scale, axis=1)
     frame = np.full((height, width), 255 if outer_padding_white else 0, dtype=np.uint8)
     ox = pad + (avail_w - sym_w) // 2
     oy = pad + (avail_h - sym_h) // 2

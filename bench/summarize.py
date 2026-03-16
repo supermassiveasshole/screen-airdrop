@@ -13,7 +13,9 @@ RESULT_ROOT = ROOT / "bench" / "results"
 
 def _load_records() -> dict[str, list[dict]]:
     grouped: dict[str, list[dict]] = defaultdict(list)
-    for path in sorted(RESULT_ROOT.glob("*benchmark_*.json")):
+    paths = sorted(RESULT_ROOT.glob("*benchmark_*.json"))
+    paths.extend(path for path in sorted(RESULT_ROOT.glob("*analysis_*.json")) if path not in paths)
+    for path in paths:
         data = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(data, list):
             continue
@@ -96,6 +98,29 @@ def main() -> int:
                     item.get("payload_bytes", 0),
                     float(item.get("rx_payload_kib_per_s", 0.0)),
                     item.get("status", "runbook"),
+                )
+            )
+        lines.append("")
+
+    if grouped.get("debug_snapshot_analysis"):
+        lines.extend(
+            [
+                "## Debug Snapshot Analysis",
+                "",
+                "| file | label | total_frames | failure_rate | data_failure_rate | control_failure_rate | primary_decode_error |",
+                "|---|---|---:|---:|---:|---:|---|",
+            ]
+        )
+        for item in grouped["debug_snapshot_analysis"]:
+            lines.append(
+                "| {0} | {1} | {2} | {3:.4f} | {4:.4f} | {5:.4f} | {6} |".format(
+                    item["_source_file"],
+                    item.get("label", ""),
+                    int(item.get("total_frames", 0)),
+                    float(item.get("failure_rate", 0.0)),
+                    float(item.get("data_failure_rate", 0.0)),
+                    float(item.get("control_failure_rate", 0.0)),
+                    item.get("primary_decode_error", ""),
                 )
             )
         lines.append("")

@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 
 import numpy as np
 
+from screen_airdrop.common.control_plane import control_kind_from_wire_chunk_id
 from screen_airdrop.common.protocol_basic import (
     DEFAULT_GRID_H,
     DEFAULT_GRID_W,
@@ -21,6 +22,7 @@ from screen_airdrop.receiver.capture_mss import compute_frame_diff, screenshot_t
 from screen_airdrop.receiver.decoder_basic import DecodeMetaBasic
 from screen_airdrop.receiver.protocol_adapter_basic import BasicProtocolDecoder
 from screen_airdrop.receiver.protocol_adapter_compact import CompactProtocolDecoder
+from screen_airdrop.receiver.protocol_adapter_gray4 import Gray4ProtocolDecoder
 
 
 @dataclass
@@ -30,10 +32,12 @@ class DecodeResult:
     frame_id: int
     frame_type: int
     meta: DecodeMetaBasic
+    decoded_ts: float = field(default_factory=time.time)
 
 
 @dataclass
 class PipelineStats:
+    start_ts: float = field(default_factory=time.time)
     captured: int = 0
     dropped_queue_full: int = 0
     duplicate_frames: int = 0
@@ -49,6 +53,22 @@ class PipelineStats:
     capture_grab_ops: int = 0
     capture_copy_ops: int = 0
     capture_dedup_ops: int = 0
+    last_decode_error: str = ""
+    last_failure_class: str = ""
+    failure_count_header: int = 0
+    failure_count_payload: int = 0
+    failure_count_locator: int = 0
+    failure_count_unknown: int = 0
+    first_valid_frame_ts: Optional[float] = None
+    first_data_frame_ts: Optional[float] = None
+    first_new_chunk_ts: Optional[float] = None
+    startup_sync_frames_decoded: int = 0
+    startup_control_frames_decoded: int = 0
+    decoded_new_chunks: int = 0
+    decoded_duplicate_chunks: int = 0
+    lock_acquire_to_locked: int = 0
+    lock_locked_to_acquire: int = 0
+    locked_decode_fail_streak_max: int = 0
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def snapshot(self) -> Dict[str, Union[int, float]]:
@@ -69,7 +89,48 @@ class PipelineStats:
                 "capture_grab_ops": self.capture_grab_ops,
                 "capture_copy_ops": self.capture_copy_ops,
                 "capture_dedup_ops": self.capture_dedup_ops,
+                "last_decode_error": self.last_decode_error,
+                "last_failure_class": self.last_failure_class,
+                "failure_count_header": self.failure_count_header,
+                "failure_count_payload": self.failure_count_payload,
+                "failure_count_locator": self.failure_count_locator,
+                "failure_count_unknown": self.failure_count_unknown,
+                "time_to_first_valid_frame_s": (
+                    0.0
+                    if self.first_valid_frame_ts is None
+                    else max(0.0, self.first_valid_frame_ts - self.start_ts)
+                ),
+                "time_to_first_data_frame_s": (
+                    0.0
+                    if self.first_data_frame_ts is None
+                    else max(0.0, self.first_data_frame_ts - self.start_ts)
+                ),
+                "time_to_first_new_chunk_s": (
+                    0.0
+                    if self.first_new_chunk_ts is None
+                    else max(0.0, self.first_new_chunk_ts - self.start_ts)
+                ),
+                "startup_sync_frames_decoded": self.startup_sync_frames_decoded,
+                "startup_control_frames_decoded": self.startup_control_frames_decoded,
+                "decoded_new_chunks": self.decoded_new_chunks,
+                "decoded_duplicate_chunks": self.decoded_duplicate_chunks,
+                "lock_acquire_to_locked": self.lock_acquire_to_locked,
+                "lock_locked_to_acquire": self.lock_locked_to_acquire,
+                "locked_decode_fail_streak_max": self.locked_decode_fail_streak_max,
             }
+
+
+def _classify_gray4_decode_failure(decode_error: str) -> str:
+    raw = str(decode_error).strip().lower()
+    if not raw:
+        return ""
+    if "payload crc mismatch" in raw or "crc mismatch" in raw:
+        return "payload"
+    if "bad v3 magic" in raw or "format parity mismatch" in raw:
+        return "header"
+    if "locator" in raw or "no_finder" in raw or "finder" in raw:
+        return "locator"
+    return "unknown"
 
 
 class CaptureThread(threading.Thread):
@@ -83,6 +144,8 @@ class CaptureThread(threading.Thread):
         stats: PipelineStats,
         frame_diff_threshold: float = 0.015,
         target_fps: float = 30.0,
+        dump_dir: Optional[str] = None,
+        dump_max_frames: int = 0,
     ) -> None:
         super().__init__(daemon=True, name="CaptureThread")
         self._capture = capture
@@ -91,6 +154,9 @@ class CaptureThread(threading.Thread):
         self._stats = stats
         self._frame_diff_threshold = frame_diff_threshold
         self._target_fps = target_fps
+        self._dump_dir = dump_dir
+        self._dump_max_frames = max(0, int(dump_max_frames))
+        self._dump_written = 0
         self.error: Optional[Exception] = None
 
     def run(self) -> None:
@@ -156,6 +222,13 @@ class CaptureThread(threading.Thread):
                         time.sleep(frame_interval - elapsed)
                 last_grab = time.perf_counter()
 
+                if self._dump_dir and self._dump_written < self._dump_max_frames:
+                    dump_path = os.path.join(
+                        self._dump_dir, "{0:06d}.npy".format(self._dump_written)
+                    )
+                    np.save(dump_path, frame)
+                    self._dump_written += 1
+
                 # Push to queue; if full, drop the oldest frame to keep freshness
                 if self._frame_queue.full():
                     try:
@@ -189,6 +262,7 @@ class DecodeWorker(threading.Thread):
         locator_engine: str = "auto",
         locator_confidence_threshold: float = 0.55,
         initial_search_roi: Optional[Tuple[int, int, int, int]] = None,
+        shared_gray4_calibration_by_mask: Optional[Dict[int, np.ndarray]] = None,
     ) -> None:
         super().__init__(daemon=True, name="DecodeWorker-{0}".format(worker_id))
         self._worker_id = worker_id
@@ -205,9 +279,12 @@ class DecodeWorker(threading.Thread):
         # Per-worker track ROI state. Keep user-provided seed ROI as failure fallback.
         self._initial_search_roi = initial_search_roi
         self._track_roi: Optional[Tuple[int, int, int, int]] = initial_search_roi
+        self._lock_state = "acquire"
+        self._locked_fail_streak = 0
+        self._locked_fail_reacquire_threshold = 5
         self.error: Optional[Exception] = None
 
-        if protocol == "compact" and guard_band == 2 and corner_size == 9:
+        if protocol in ("compact", "gray4") and guard_band == 2 and corner_size == 9:
             guard_band = 1
             corner_size = 7
             self._guard_band = guard_band
@@ -232,6 +309,16 @@ class DecodeWorker(threading.Thread):
                 locator_engine=locator_engine,
                 locator_confidence_threshold=locator_confidence_threshold,
             )
+        elif protocol == "gray4":
+            self._decoder = Gray4ProtocolDecoder(
+                grid_w=grid_w,
+                grid_h=grid_h,
+                guard_band=guard_band,
+                corner_size=corner_size,
+                locator_engine=locator_engine,
+                locator_confidence_threshold=locator_confidence_threshold,
+                shared_calibration_by_mask=shared_gray4_calibration_by_mask,
+            )
         else:
             raise ValueError(f"Unknown protocol: {protocol}")
 
@@ -249,7 +336,7 @@ class DecodeWorker(threading.Thread):
                 continue
 
             try:
-                search_roi = self._track_roi
+                search_roi = self._track_roi if self._lock_state == "locked" else self._initial_search_roi
                 detect_mode = "track" if search_roi is not None else "full"
                 decoded = self._decoder.decode_frame(
                     frame=frame,
@@ -269,6 +356,9 @@ class DecodeWorker(threading.Thread):
                 x2 = min(fw, bx + bw + margin)
                 y2 = min(fh, by + bh + margin)
                 self._track_roi = (x1, y1, x2 - x1, y2 - y1)
+                previous_state = self._lock_state
+                self._lock_state = "locked"
+                self._locked_fail_streak = 0
 
                 result = DecodeResult(
                     chunk_id=int(header.chunk_id),
@@ -276,19 +366,53 @@ class DecodeWorker(threading.Thread):
                     frame_id=int(header.frame_id),
                     frame_type=int(header.frame_type),
                     meta=meta,
+                    decoded_ts=time.time(),
                 )
                 try:
                     self._result_queue.put(result, timeout=1.0)
                     with self._stats._lock:
                         self._stats.decode_ok += 1
+                        if self._stats.first_valid_frame_ts is None:
+                            self._stats.first_valid_frame_ts = result.decoded_ts
+                        if int(header.frame_type) == int(FRAME_DATA) and self._stats.first_data_frame_ts is None:
+                            self._stats.first_data_frame_ts = result.decoded_ts
+                        if previous_state != "locked":
+                            self._stats.lock_acquire_to_locked += 1
                 except queue.Full:
                     with self._stats._lock:
                         self._stats.dropped_result_queue_full += 1
-            except Exception:
-                self._track_roi = self._initial_search_roi
+            except Exception as exc:
+                if self._lock_state == "locked":
+                    self._locked_fail_streak += 1
+                    with self._stats._lock:
+                        if self._locked_fail_streak > self._stats.locked_decode_fail_streak_max:
+                            self._stats.locked_decode_fail_streak_max = self._locked_fail_streak
+                    if self._locked_fail_streak >= self._locked_fail_reacquire_threshold:
+                        self._lock_state = "acquire"
+                        self._track_roi = self._initial_search_roi
+                        self._locked_fail_streak = 0
+                        with self._stats._lock:
+                            self._stats.lock_locked_to_acquire += 1
+                else:
+                    self._track_roi = self._initial_search_roi
                 with self._stats._lock:
                     self._stats.decode_fail += 1
                     self._stats.decode_exceptions += 1
+                    self._stats.last_decode_error = str(exc)
+                    failure_class = (
+                        _classify_gray4_decode_failure(str(exc))
+                        if isinstance(self._decoder, Gray4ProtocolDecoder)
+                        else ""
+                    )
+                    self._stats.last_failure_class = failure_class
+                    if failure_class == "header":
+                        self._stats.failure_count_header += 1
+                    elif failure_class == "payload":
+                        self._stats.failure_count_payload += 1
+                    elif failure_class == "locator":
+                        self._stats.failure_count_locator += 1
+                    elif failure_class:
+                        self._stats.failure_count_unknown += 1
 
 
 class AssemblerThread(threading.Thread):
@@ -326,20 +450,31 @@ class AssemblerThread(threading.Thread):
                 continue
 
             if result.frame_type == FRAME_DATA:
-                if result.chunk_id > 0:
-                    is_new_chunk = result.chunk_id not in self._assembler.chunks
-                    self._assembler.add(result.chunk_id, result.payload)
-                    if is_new_chunk:
-                        with self._stats._lock:
-                            self._stats.assembled += 1
-                            self._stats.assembled_bytes += len(result.payload)
-                elif result.chunk_id == 0:
-                    # Manifest is encoded as DATA frame with chunk_id=0.
-                    # Ignore malformed manifest payloads instead of crashing the assembler thread.
+                control_kind = control_kind_from_wire_chunk_id(result.chunk_id)
+                if control_kind is not None:
+                    with self._stats._lock:
+                        if self._stats.first_new_chunk_ts is None:
+                            self._stats.startup_control_frames_decoded += 1
                     try:
-                        self._assembler.add(0, result.payload)
+                        self._assembler.add_control(control_kind, result.payload)
                     except Exception:
                         pass
+                elif result.chunk_id > 0:
+                    is_new_chunk = result.chunk_id not in self._assembler.chunks
+                    self._assembler.add(result.chunk_id, result.payload)
+                    with self._stats._lock:
+                        if is_new_chunk:
+                            self._stats.decoded_new_chunks += 1
+                            self._stats.assembled += 1
+                            self._stats.assembled_bytes += len(result.payload)
+                            if self._stats.first_new_chunk_ts is None:
+                                self._stats.first_new_chunk_ts = result.decoded_ts
+                        else:
+                            self._stats.decoded_duplicate_chunks += 1
+            else:
+                with self._stats._lock:
+                    if self._stats.first_new_chunk_ts is None:
+                        self._stats.startup_sync_frames_decoded += 1
 
             if self._on_frame_callback is not None:
                 try:
@@ -363,6 +498,8 @@ class ReceiverPipeline:
         frame_diff_threshold: float = 0.015,
         frame_queue_size: int = 32,
         result_queue_size: int = 256,
+        capture_dump_dir: Optional[str] = None,
+        capture_dump_max_frames: int = 0,
         protocol: str = "basic",  # NEW: protocol selection
         grid_w: int = DEFAULT_GRID_W,
         grid_h: int = DEFAULT_GRID_H,
@@ -381,10 +518,13 @@ class ReceiverPipeline:
         self._num_workers = num_workers
 
         self.stats = PipelineStats()
+        self._gray4_calibration_by_mask: Dict[int, np.ndarray] = {}
         self._frame_queue: queue.Queue = queue.Queue(maxsize=frame_queue_size)
         self._result_queue: queue.Queue = queue.Queue(maxsize=result_queue_size)
         self._stop_event = threading.Event()
         self.done_event = threading.Event()
+        if capture_dump_dir:
+            os.makedirs(capture_dump_dir, exist_ok=True)
 
         self._capture_thread = CaptureThread(
             capture=capture,
@@ -393,6 +533,8 @@ class ReceiverPipeline:
             stats=self.stats,
             frame_diff_threshold=frame_diff_threshold,
             target_fps=capture_fps,
+            dump_dir=capture_dump_dir,
+            dump_max_frames=capture_dump_max_frames,
         )
         self._decode_workers = [
             DecodeWorker(
@@ -409,6 +551,7 @@ class ReceiverPipeline:
                 locator_engine=locator_engine,
                 locator_confidence_threshold=locator_confidence_threshold,
                 initial_search_roi=initial_search_roi,
+                shared_gray4_calibration_by_mask=self._gray4_calibration_by_mask,
             )
             for i in range(num_workers)
         ]

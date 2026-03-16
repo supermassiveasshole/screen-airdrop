@@ -21,7 +21,7 @@ except ModuleNotFoundError:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Real-frame locator + decode benchmark.")
-    parser.add_argument("--protocol", choices=["basic", "compact", "all"], default="all")
+    parser.add_argument("--protocol", choices=["basic", "compact", "gray4", "all"], default="all")
     parser.add_argument("--iterations", type=int, default=15)
     parser.add_argument("--output-json", type=str, default="")
     return parser.parse_args()

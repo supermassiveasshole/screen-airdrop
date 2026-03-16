@@ -51,7 +51,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="End-to-end benchmark for basic vs compact.")
     parser.add_argument("--mode", choices=["replay", "screen"], default="screen")
-    parser.add_argument("--protocol", choices=["basic", "compact", "all"], default="all")
+    parser.add_argument("--protocol", choices=["basic", "compact", "gray4", "all"], default="all")
     parser.add_argument("--layout-mode", choices=list(LAYOUT_MODES), default="same_grid")
     parser.add_argument("--ecc", choices=["all", *ECC_LEVELS], default="Q")
     parser.add_argument("--payload-mode", choices=list(PAYLOAD_MODES), default="fixed")

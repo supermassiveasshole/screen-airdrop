@@ -9,6 +9,16 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 
+from screen_airdrop.common.control_plane import (
+    CONTROL_KIND_GENERATION,
+    CONTROL_KIND_LAYOUT,
+    CONTROL_KIND_MANIFEST,
+    CONTROL_KIND_SESSION,
+    CONTROL_WIRE_CHUNK_IDS,
+    encode_generation_control,
+    encode_layout_bootstrap,
+    encode_session_bootstrap,
+)
 from screen_airdrop.common.protocol_basic import FRAME_DATA, FrameHeaderBasic
 from screen_airdrop.common.protocol_interface import DecodedFrame
 from screen_airdrop.receiver.assembler import ChunkAssembler
@@ -145,6 +155,36 @@ class TestCaptureThreadQueueDrop:
             frames_in_queue.append(fq.get_nowait())
         assert any(f[0, 0, 0] == 99 for f in frames_in_queue), "new frame must be in queue"
 
+    def test_capture_dump_writes_replay_frame(self, tmp_path):
+        from screen_airdrop.receiver.pipeline import CaptureThread
+
+        fq = queue.Queue(maxsize=4)
+        stats = PipelineStats()
+        stop = threading.Event()
+        dump_dir = tmp_path / "capture-dump"
+        dump_dir.mkdir()
+        frame = _make_black_frame()
+        frame[:] = 77
+
+        thread = CaptureThread(
+            capture=MagicMock(),
+            frame_queue=fq,
+            stop_event=stop,
+            stats=stats,
+            dump_dir=str(dump_dir),
+            dump_max_frames=2,
+        )
+        thread._dump_dir = str(dump_dir)
+        thread._dump_max_frames = 2
+        thread._dump_written = 0
+
+        dump_path = dump_dir / "000000.npy"
+        np.save(dump_path, frame)
+        loaded = np.load(dump_path)
+
+        assert loaded.shape == frame.shape
+        assert int(loaded[0, 0, 0]) == 77
+
 
 # ---------------------------------------------------------------------------
 # AssemblerThread – concurrent results, completion signalling
@@ -263,6 +303,249 @@ class TestAssemblerThread:
         assert thread.error is None
 
 
+def test_chunk_assembler_accepts_explicit_manifest_control():
+    from screen_airdrop.common.manifest import Manifest
+
+    manifest = Manifest(
+        protocol_version=1,
+        session_id=123,
+        created_at="2026-03-14T00:00:00Z",
+        input_root_name="payload.bin",
+        pack="tar",
+        compress="none",
+        chunk_size=16,
+        total_chunks=2,
+        payload_size=5,
+        payload_sha256="abc",
+        entries=[],
+    )
+
+    asm = ChunkAssembler()
+    asm.add_control(CONTROL_KIND_MANIFEST, manifest.to_json_bytes())
+
+    assert asm.manifest is not None
+    assert asm.manifest.session_id == 123
+    assert asm.manifest.total_chunks == 2
+
+
+def test_chunk_assembler_accepts_layout_bootstrap_control():
+    asm = ChunkAssembler()
+    asm.add_control(
+        CONTROL_KIND_LAYOUT,
+        encode_layout_bootstrap(
+            {
+                "protocol": "gray4",
+                "protocol_version": "4.1",
+                "frame_w": 170,
+                "frame_h": 106,
+                "grid_w": 160,
+                "grid_h": 96,
+                "bits_per_module": 2,
+                "guard_band": 1,
+                "quiet_zone": 4,
+                "finder_size": 7,
+                "ecc_level": "L",
+                "frame_payload_cap": 3754,
+                "effective_chunk_size": 3378,
+                "module_grid": "160x96",
+            }
+        ),
+    )
+
+    assert asm.layout_info is not None
+    assert asm.layout_info["protocol"] == "gray4"
+    assert asm.layout_info["bits_per_module"] == 2
+
+
+def test_chunk_assembler_accepts_session_bootstrap_control():
+    asm = ChunkAssembler()
+    asm.add_control(
+        CONTROL_KIND_SESSION,
+        encode_session_bootstrap(
+            {
+                "session_id": 456,
+                "protocol": "gray4",
+                "protocol_version": 4,
+                "created_at": "2026-03-14T00:00:00Z",
+                "input_root_name": "paper.pdf",
+                "pack": "tar",
+                "compress": "gzip",
+                "window_name": "screen-airdrop",
+            }
+        ),
+    )
+
+    assert asm.session_info is not None
+    assert asm.session_info["session_id"] == 456
+    assert asm.session_info["protocol"] == "gray4"
+
+
+def test_chunk_assembler_accepts_generation_control():
+    asm = ChunkAssembler()
+    asm.add_control(
+        CONTROL_KIND_GENERATION,
+        encode_generation_control(
+            {
+                "generation_id": 7,
+                "total_frames": 42,
+                "payload_chunk_count": 31,
+                "effective_chunk_size": 2048,
+                "protocol": "gray4",
+            }
+        ),
+    )
+
+    assert asm.generation_info is not None
+    assert asm.generation_info["generation_id"] == 7
+    assert asm.generations[7]["payload_chunk_count"] == 31
+
+
+def test_assembler_thread_does_not_count_layout_control_as_data():
+    assembler = ChunkAssembler()
+    rq = queue.Queue()
+    done = threading.Event()
+    stop = threading.Event()
+    stats = PipelineStats()
+
+    thread = AssemblerThread(
+        result_queue=rq,
+        assembler=assembler,
+        done_event=done,
+        stop_event=stop,
+        stats=stats,
+    )
+    thread.start()
+
+    rq.put(
+        DecodeResult(
+            chunk_id=CONTROL_WIRE_CHUNK_IDS[CONTROL_KIND_LAYOUT],
+            payload=encode_layout_bootstrap(
+                {
+                    "protocol": "compact",
+                    "protocol_version": "4.0",
+                    "frame_w": 170,
+                    "frame_h": 106,
+                    "grid_w": 160,
+                    "grid_h": 96,
+                    "bits_per_module": 1,
+                    "guard_band": 1,
+                    "quiet_zone": 4,
+                    "finder_size": 7,
+                    "ecc_level": "Q",
+                    "frame_payload_cap": 2048,
+                    "effective_chunk_size": 1834,
+                    "module_grid": "160x96",
+                }
+            ),
+            frame_id=0,
+            frame_type=int(FRAME_DATA),
+            meta=MagicMock(),
+        )
+    )
+
+    time.sleep(0.1)
+    stop.set()
+    thread.join(timeout=2.0)
+
+    assert thread.error is None
+    assert assembler.layout_info is not None
+    assert stats.assembled == 0
+    assert stats.assembled_bytes == 0
+
+
+def test_assembler_thread_accepts_session_control_without_counting_data():
+    assembler = ChunkAssembler()
+    rq = queue.Queue()
+    done = threading.Event()
+    stop = threading.Event()
+    stats = PipelineStats()
+
+    thread = AssemblerThread(
+        result_queue=rq,
+        assembler=assembler,
+        done_event=done,
+        stop_event=stop,
+        stats=stats,
+    )
+    thread.start()
+
+    rq.put(
+        DecodeResult(
+            chunk_id=CONTROL_WIRE_CHUNK_IDS[CONTROL_KIND_SESSION],
+            payload=encode_session_bootstrap(
+                {
+                    "session_id": 789,
+                    "protocol": "compact",
+                    "protocol_version": 4,
+                    "created_at": "2026-03-14T00:00:00Z",
+                    "input_root_name": "sample.bin",
+                    "pack": "tar",
+                    "compress": "none",
+                    "window_name": "screen-airdrop",
+                }
+            ),
+            frame_id=0,
+            frame_type=int(FRAME_DATA),
+            meta=MagicMock(),
+        )
+    )
+
+    time.sleep(0.1)
+    stop.set()
+    thread.join(timeout=2.0)
+
+    assert thread.error is None
+    assert assembler.session_info is not None
+    assert assembler.session_info["session_id"] == 789
+    assert stats.assembled == 0
+    assert stats.assembled_bytes == 0
+
+
+def test_assembler_thread_accepts_generation_control_without_counting_data():
+    assembler = ChunkAssembler()
+    rq = queue.Queue()
+    done = threading.Event()
+    stop = threading.Event()
+    stats = PipelineStats()
+
+    thread = AssemblerThread(
+        result_queue=rq,
+        assembler=assembler,
+        done_event=done,
+        stop_event=stop,
+        stats=stats,
+    )
+    thread.start()
+
+    rq.put(
+        DecodeResult(
+            chunk_id=CONTROL_WIRE_CHUNK_IDS[CONTROL_KIND_GENERATION],
+            payload=encode_generation_control(
+                {
+                    "generation_id": 3,
+                    "total_frames": 20,
+                    "payload_chunk_count": 12,
+                    "effective_chunk_size": 1834,
+                    "protocol": "compact",
+                }
+            ),
+            frame_id=0,
+            frame_type=int(FRAME_DATA),
+            meta=MagicMock(),
+        )
+    )
+
+    time.sleep(0.1)
+    stop.set()
+    thread.join(timeout=2.0)
+
+    assert thread.error is None
+    assert assembler.generation_info is not None
+    assert assembler.generation_info["generation_id"] == 3
+    assert stats.assembled == 0
+    assert stats.assembled_bytes == 0
+
+
 # ---------------------------------------------------------------------------
 # ChunkAssembler O(1) paths
 # ---------------------------------------------------------------------------
@@ -299,6 +582,18 @@ class TestChunkAssemblerO1:
         assert asm.missing_count() == 4
         asm.add(1, b"x")  # duplicate – count must not change
         assert asm.missing_count() == 4
+
+    def test_missing_chunk_ids_returns_first_missing_chunks(self):
+        from screen_airdrop.common.manifest import Manifest
+
+        asm = ChunkAssembler()
+        manifest = MagicMock(spec=Manifest)
+        manifest.total_chunks = 6
+        asm.manifest = manifest
+        asm.add(2, b"b")
+        asm.add(5, b"e")
+
+        assert asm.missing_chunk_ids(limit=3) == [1, 3, 4]
 
     def test_received_count_tracks_unique(self):
         asm = ChunkAssembler()
@@ -431,3 +726,99 @@ class TestDecodeWorker:
         assert stats.decode_fail == 1
         assert stats.decode_exceptions == 1
         assert worker._track_roi == (5, 6, 70, 70)
+
+    def test_lock_state_transitions_to_locked_after_success(self):
+        fq = queue.Queue()
+        rq = queue.Queue()
+        stop = threading.Event()
+        stats = PipelineStats()
+        fq.put(_make_black_frame(100, 100))
+
+        def _fake_decode_frame(**kwargs):
+            stop.set()
+            header = FrameHeaderBasic.make(
+                frame_type=FRAME_DATA,
+                session_id=1,
+                epoch_id=0,
+                frame_id=1,
+                total_frames=10,
+                chunk_id=1,
+                payload=b"ok",
+            )
+            return DecodedFrame(
+                frame_header=header,
+                payload=b"ok",
+                meta=_make_meta(det_bbox=(10, 10, 40, 40)),
+            )
+
+        with patch(
+            "screen_airdrop.receiver.protocol_adapter_basic.BasicProtocolDecoder.decode_frame",
+            side_effect=_fake_decode_frame,
+        ):
+            worker = DecodeWorker(
+                worker_id=0,
+                frame_queue=fq,
+                result_queue=rq,
+                stop_event=stop,
+                stats=stats,
+            )
+            worker.start()
+            worker.join(timeout=2.0)
+
+        snap = stats.snapshot()
+        assert worker._lock_state == "locked"
+        assert snap["lock_acquire_to_locked"] == 1
+        assert snap["time_to_first_valid_frame_s"] >= 0.0
+        assert snap["time_to_first_data_frame_s"] >= 0.0
+
+    def test_lock_state_reacquires_after_five_failures(self):
+        fq = queue.Queue()
+        rq = queue.Queue()
+        stop = threading.Event()
+        stats = PipelineStats()
+        for _ in range(6):
+            fq.put(_make_black_frame(100, 100))
+
+        calls = {"count": 0}
+
+        def _fake_decode_frame(**kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                header = FrameHeaderBasic.make(
+                    frame_type=FRAME_DATA,
+                    session_id=1,
+                    epoch_id=0,
+                    frame_id=1,
+                    total_frames=10,
+                    chunk_id=1,
+                    payload=b"ok",
+                )
+                return DecodedFrame(
+                    frame_header=header,
+                    payload=b"ok",
+                    meta=_make_meta(det_bbox=(10, 10, 40, 40)),
+                )
+            if calls["count"] >= 6:
+                stop.set()
+            raise ValueError("decode failed")
+
+        with patch(
+            "screen_airdrop.receiver.protocol_adapter_basic.BasicProtocolDecoder.decode_frame",
+            side_effect=_fake_decode_frame,
+        ):
+            worker = DecodeWorker(
+                worker_id=0,
+                frame_queue=fq,
+                result_queue=rq,
+                stop_event=stop,
+                stats=stats,
+                initial_search_roi=(5, 6, 70, 70),
+            )
+            worker.start()
+            worker.join(timeout=2.0)
+
+        snap = stats.snapshot()
+        assert worker._lock_state == "acquire"
+        assert worker._track_roi == (5, 6, 70, 70)
+        assert snap["lock_locked_to_acquire"] == 1
+        assert snap["locked_decode_fail_streak_max"] == 5
