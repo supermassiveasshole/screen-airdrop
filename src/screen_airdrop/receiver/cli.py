@@ -65,10 +65,18 @@ def _parse_module_grid(raw: str) -> Tuple[int, int]:
     return gw, gh
 
 
+# Protocol geometry configuration
+PROTOCOL_GEOMETRY_MAP = {
+    "compact": (1, 7),
+    "gray4": (1, 7),
+    "layered": (1, 7),
+    "basic": (2, 9),
+}
+
+
 def _protocol_geometry(protocol: str) -> Tuple[int, int]:
-    if protocol in ("compact", "gray4", "layered"):
-        return (1, 7)
-    return (2, 9)
+    """Get guard_band and corner_size for protocol."""
+    return PROTOCOL_GEOMETRY_MAP.get(protocol, (2, 9))
 
 
 def _write_report(path: Optional[str], report: dict) -> None:
@@ -1757,18 +1765,20 @@ def main(argv=None):
     if needs_runtime_roi_selection:
         print("select-region with auto_then_manual requires legacy loop for runtime ROI selection")
     if use_pipeline:
+        # Prepare runtime configuration
         num_workers = args.decode_workers if args.decode_workers > 0 else None
+        decode_workers = 1 if num_workers is None else num_workers
         grid_w, grid_h = _parse_module_grid(args.module_grid)
         guard_band, corner_size = _protocol_geometry(args.protocol)
         pipeline_seed_roi_local = _build_pipeline_seed_roi_local(source, forced_roi)
 
         # Infer manual mode from ROI presence
-        manual_mode = bool(args.roi or args.roi_interactive)
+        manual_mode = forced_roi is not None
 
         pipeline = ScreenLiveRuntime(
             capture=source,
             assembler=assembler,
-            decode_workers=1 if num_workers is None else num_workers,
+            decode_workers=decode_workers,
             prep_process=args.prep_process,
             capture_fps=args.capture_fps,
             capture_dump_dir=args.capture_dump_dir,
@@ -1782,14 +1792,15 @@ def main(argv=None):
             initial_search_roi=pipeline_seed_roi_local,
         )
         print(
-            "screen live runtime: protocol={0} workers={1} prep={2} capture_fps={3} seed_roi={4}".format(
+            "screen live runtime: protocol={0} workers={1} prep={2} capture_fps={3} seed_roi={4} mode={5}".format(
                 args.protocol,
-                1 if num_workers is None else num_workers,
+                decode_workers,
                 args.prep_process,
                 args.capture_fps,
                 "none"
                 if pipeline_seed_roi_local is None
                 else "{0},{1},{2},{3}".format(*pipeline_seed_roi_local),
+                "manual" if manual_mode else "auto",
             )
         )
         pipeline.start()
