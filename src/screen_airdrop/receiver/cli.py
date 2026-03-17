@@ -51,6 +51,9 @@ from screen_airdrop.receiver.debug import DebugSnapshotManager
 # ROI utilities
 from screen_airdrop.receiver.roi import RoiManager, ensure_roi_valid
 
+# Configuration
+from screen_airdrop.receiver.config import ReceiverConfig
+
 
 def _parse_region(raw: Optional[str]) -> Optional[Tuple[int, int, int, int]]:
     if not raw:
@@ -284,22 +287,22 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _build_source(args, region):
-    if args.source == "replay":
-        if not args.frames_dir:
+def _build_source(config: ReceiverConfig, region):
+    if config.is_replay_mode():
+        if not config.frames_dir:
             raise ValueError("--frames-dir is required when --source replay")
-        return FrameReplaySource(frames_dir=args.frames_dir)
+        return FrameReplaySource(frames_dir=config.frames_dir)
 
     capture_region = None
     # Manual ROI mode should crop at capture stage to avoid coordinate drift and
     # selector-overlay interference in subsequent decode frames.
-    if args.roi_mode == "manual" and region is not None:
+    if config.roi_mode == "manual" and region is not None:
         capture_region = region
 
     return ScreenCapture(
-        window_title=args.window_title,
+        window_title=config.window_title,
         region=capture_region,
-        monitor_index=args.monitor_index,
+        monitor_index=config.monitor_index,
     )
 
 
@@ -357,21 +360,20 @@ def _should_use_pipeline(
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    config = ReceiverConfig.from_args(args)
+    config.validate()
     roi_policy = RoiPolicy.from_args(args)
     roi_policy.apply_to_args(args)
-    if args.source == "screen" and args.window_title and not (args.roi or args.region):
+    if config.source == "screen" and config.window_title and not (config.roi or config.region):
         print(
             "warning: --window-title is currently not used for real window lookup; "
             "capture will fallback to full monitor. "
             "Use --roi x,y,w,h or --roi-interactive for reliable decode."
         )
 
-    if args.block_size == "auto":
-        block_size_candidates = [6, 8, 4]
-    else:
-        block_size_candidates = [int(args.block_size)]
+    block_size_candidates = config.get_block_size_candidates()
     selected_block_size = None  # type: Optional[int]
-    grid_w, grid_h = _parse_module_grid(args.module_grid)
+    grid_w, grid_h = config.get_grid_size()
     grid_candidates = [(grid_w, grid_h), (160, 96), (176, 100), (192, 108), (224, 126)]
     uniq = []
     seen = set()
@@ -382,8 +384,8 @@ def main(argv=None):
         uniq.append(g)
     grid_candidates = uniq
 
-    cli_roi = _parse_region(args.roi) or _parse_region(args.region)
-    profile_roi = load_profile(args.roi_profile) if args.roi_profile else None
+    cli_roi = _parse_region(config.roi) or _parse_region(config.region)
+    profile_roi = load_profile(config.roi_profile) if config.roi_profile else None
 
     forced_roi = cli_roi or profile_roi
     if forced_roi is not None:
@@ -395,32 +397,32 @@ def main(argv=None):
     stats = TransferStats()
     stats.set_roi_mode(roi_policy.report_mode)
     if (
-        args.source == "screen"
+        config.source == "screen"
         and roi_policy.mode == "manual"
         and forced_roi is None
         and roi_policy.interactive
     ):
         stats.mark_manual_select_attempt()
-        selected = select_region(get_monitor_region(args.monitor_index))
+        selected = select_region(get_monitor_region(config.monitor_index))
         if selected is None:
             raise RuntimeError("manual roi selection canceled")
         forced_roi = ensure_roi_valid(selected)
         stats.mark_manual_roi(switched=False)
-        if args.roi_profile:
-            save_profile(args.roi_profile, forced_roi, args.monitor_index)
+        if config.roi_profile:
+            save_profile(config.roi_profile, forced_roi, config.monitor_index)
 
-    source = _build_source(args, forced_roi)
-    if args.debug_dir and isinstance(source, ScreenCapture):
+    source = _build_source(config, forced_roi)
+    if config.debug_dir and isinstance(source, ScreenCapture):
         # Debug mode should not be throttled by frame dedup; otherwise
         # mostly-static captures may produce almost no snapshots.
         source.frame_diff_threshold = 0.0
-    if args.debug_dir:
-        os.makedirs(args.debug_dir, exist_ok=True)
+    if config.debug_dir:
+        os.makedirs(config.debug_dir, exist_ok=True)
         print(
             "debug enabled: dir={0} interval={1}s max_frames={2}".format(
-                args.debug_dir,
-                args.debug_interval,
-                args.debug_max_frames,
+                config.debug_dir,
+                config.debug_interval,
+                config.debug_max_frames,
             )
         )
     assembler = ChunkAssembler()
@@ -428,7 +430,7 @@ def main(argv=None):
     threshold = None
     start = time.time()
     last_good = start
-    next_stats_ts = start + max(0.1, args.stats_interval)
+    next_stats_ts = start + max(0.1, config.stats_interval)
 
     final_report = None  # type: Optional[dict]
     auto_fail_count = 0
@@ -437,11 +439,11 @@ def main(argv=None):
 
     # Initialize debug snapshot manager
     debug_manager = None
-    if args.debug_dir:
+    if config.debug_dir:
         debug_manager = DebugSnapshotManager(
-            debug_dir=args.debug_dir,
-            debug_max_frames=args.debug_max_frames,
-            debug_interval=args.debug_interval,
+            debug_dir=config.debug_dir,
+            debug_max_frames=config.debug_max_frames,
+            debug_interval=config.debug_interval,
         )
 
     last_decode_error = None  # type: Optional[str]
@@ -482,7 +484,7 @@ def main(argv=None):
     decoded_duplicate_chunks = 0
     last_v3_meta = None
     last_v31_meta = None
-    protocol_path_used = args.protocol
+    protocol_path_used = config.protocol
     decode_attempt_total = 0
     fallback_hits = 0
     locator_new_fail_reason = ""
@@ -495,13 +497,13 @@ def main(argv=None):
     last_det_bbox = None  # type: Optional[Tuple[int, int, int, int]]
     last_det_confidence = 0.0
     layered_failure_trace = None  # type: Optional[Dict[str, object]]
-    protocol_report_adapter = make_protocol_report_adapter(args.protocol)
+    protocol_report_adapter = make_protocol_report_adapter(config.protocol)
     decode_time_sum = 0.0
     decode_time_count = 0
-    replay_mode = args.source == "replay"
+    replay_mode = config.source == "replay"
     v3_track_roi = None
     v3_fail_streak = 0
-    v3_mode = "full" if (args.detect_mode == "full" or replay_mode) else "track"
+    v3_mode = "full" if (config.detect_mode == "full" or replay_mode) else "track"
     layered_locked_geometry = None
     layered_locked_fail_streak = 0
     layered_locked_geometry_age = 0
@@ -547,7 +549,7 @@ def main(argv=None):
         success_meta: Optional[object],
         failure_counts: Optional[Mapping[str, object]] = None,
     ) -> None:
-        if args.protocol not in ("gray4", "layered"):
+        if config.protocol not in ("gray4", "layered"):
             return
         report["gray4_last_failure_error"] = "" if failure_error is None else str(failure_error)
         report["gray4_last_failure_class"] = str(failure_class or "")
@@ -571,7 +573,7 @@ def main(argv=None):
         report["gray4_payload_variant_attempts"] = float(
             getattr(success_meta, "payload_variant_attempts", 0)
         )
-        if args.protocol == "layered":
+        if config.protocol == "layered":
             report["layered_control_path_version"] = 4.0
             report["layered_core_header_raw_bytes"] = float(layered_bootstrap_payload_size_bytes())
             report["layered_core_header_coded_bytes"] = float(
@@ -718,7 +720,7 @@ def main(argv=None):
         report["locked_geometry_age_max"] = _as_float(snap.get("locked_geometry_age_max", 0))
         report["homography_rmse_reused_last"] = _as_float(snap.get("homography_rmse_reused_last", 0.0))
         report["homography_rmse_reacquired_last"] = _as_float(snap.get("homography_rmse_reacquired_last", 0.0))
-        if args.protocol == "layered":
+        if config.protocol == "layered":
             report["layered_control_path_version"] = _as_float(snap.get("layered_control_path_version", 4))
             report["layered_core_header_raw_bytes"] = _as_float(snap.get("layered_core_header_raw_bytes", 0))
             report["layered_core_header_coded_bytes"] = _as_float(snap.get("layered_core_header_coded_bytes", 0))
@@ -952,16 +954,16 @@ def main(argv=None):
 
     # ── Pipeline mode: screen source + basic protocol ──────────────────────────
     needs_runtime_roi_selection = roi_policy.needs_runtime_selection(
-        source=args.source,
+        source=config.source,
         forced_roi=forced_roi,
     )
     use_pipeline = _should_use_pipeline(
-        source=args.source,
-        protocol=args.protocol,
-        debug_dir=args.debug_dir,
+        source=config.source,
+        protocol=config.protocol,
+        debug_dir=config.debug_dir,
         needs_runtime_roi_selection=needs_runtime_roi_selection,
     )
-    if args.debug_dir and args.source == "screen":
+    if config.debug_dir and config.source == "screen":
         print(
             "debug-dir set: forcing legacy loop (pipeline disabled) to emit debug snapshots"
         )
@@ -969,10 +971,10 @@ def main(argv=None):
         print("select-region with auto_then_manual requires legacy loop for runtime ROI selection")
     if use_pipeline:
         # Prepare runtime configuration
-        num_workers = args.decode_workers if args.decode_workers > 0 else None
+        num_workers = config.decode_workers if config.decode_workers > 0 else None
         decode_workers = 1 if num_workers is None else num_workers
-        grid_w, grid_h = _parse_module_grid(args.module_grid)
-        guard_band, corner_size = _protocol_geometry(args.protocol)
+        grid_w, grid_h = _parse_module_grid(config.module_grid)
+        guard_band, corner_size = _protocol_geometry(config.protocol)
         pipeline_seed_roi_local = _build_pipeline_seed_roi_local(source, forced_roi)
 
         # Infer manual mode from ROI presence
@@ -982,11 +984,11 @@ def main(argv=None):
             capture=source,
             assembler=assembler,
             decode_workers=decode_workers,
-            prep_process=args.prep_process,
-            capture_fps=args.capture_fps,
-            capture_dump_dir=args.capture_dump_dir,
-            capture_dump_max_frames=args.capture_dump_max_frames,
-            protocol=args.protocol,
+            prep_process=config.prep_process,
+            capture_fps=config.capture_fps,
+            capture_dump_dir=config.capture_dump_dir,
+            capture_dump_max_frames=config.capture_dump_max_frames,
+            protocol=config.protocol,
             grid_w=grid_w,
             grid_h=grid_h,
             guard_band=guard_band,
@@ -996,10 +998,10 @@ def main(argv=None):
         )
         print(
             "screen live runtime: protocol={0} workers={1} prep={2} capture_fps={3} seed_roi={4} mode={5}".format(
-                args.protocol,
+                config.protocol,
                 decode_workers,
-                args.prep_process,
-                args.capture_fps,
+                config.prep_process,
+                config.capture_fps,
                 "none"
                 if pipeline_seed_roi_local is None
                 else "{0},{1},{2},{3}".format(*pipeline_seed_roi_local),
@@ -1008,7 +1010,7 @@ def main(argv=None):
         )
         pipeline.start()
         try:
-            deadline = (start + args.max_seconds) if args.max_seconds > 0 else None
+            deadline = (start + config.max_seconds) if config.max_seconds > 0 else None
             last_assembled = 0
             last_assembled_ts = start
             last_rate_ts = start
@@ -1057,7 +1059,7 @@ def main(argv=None):
                         },
                     )
                     final_report["status"] = "timeout_max_seconds"
-                    _write_report(args.report_json, final_report)
+                    _write_report(config.report_json, final_report)
                     print("receiver timeout: max-seconds reached")
                     return 2
 
@@ -1073,7 +1075,7 @@ def main(argv=None):
                 if assembled > last_assembled:
                     last_assembled = assembled
                     last_assembled_ts = now
-                elif now - last_assembled_ts > args.max_idle_seconds and assembled > 0:
+                elif now - last_assembled_ts > config.max_idle_seconds and assembled > 0:
                     _sync_transfer_stats_from_pipeline(snap)
                     final_report = cast(
                         Dict[str, object], dict(stats.finalize(output_size_bytes=0, ts=now))
@@ -1094,10 +1096,10 @@ def main(argv=None):
                         },
                     )
                     final_report["status"] = "timeout_idle"
-                    _write_report(args.report_json, final_report)
-                    print("receiver timeout: no new chunks for {0}s".format(args.max_idle_seconds))
+                    _write_report(config.report_json, final_report)
+                    print("receiver timeout: no new chunks for {0}s".format(config.max_idle_seconds))
                     return 2
-                elif assembled == 0 and now - start > args.max_idle_seconds:
+                elif assembled == 0 and now - start > config.max_idle_seconds:
                     _sync_transfer_stats_from_pipeline(snap)
                     final_report = cast(
                         Dict[str, object], dict(stats.finalize(output_size_bytes=0, ts=now))
@@ -1118,9 +1120,9 @@ def main(argv=None):
                         },
                     )
                     final_report["status"] = "timeout_idle"
-                    _write_report(args.report_json, final_report)
+                    _write_report(config.report_json, final_report)
                     print(
-                        "receiver timeout: no valid frames for {0}s".format(args.max_idle_seconds)
+                        "receiver timeout: no valid frames for {0}s".format(config.max_idle_seconds)
                     )
                     return 2
 
@@ -1245,7 +1247,7 @@ def main(argv=None):
                         "dump_time_ms": float(snap.get("dump_time_ms", 0.0)),
                         "dump_ops": dump_ops_now,
                     }
-                    next_stats_ts = now + max(0.1, args.stats_interval)
+                    next_stats_ts = now + max(0.1, config.stats_interval)
 
                 if pipeline.done_event.wait(timeout=0.2):
                     break
@@ -1254,7 +1256,7 @@ def main(argv=None):
             payload_bytes = assembler.payload()
             if assembler.manifest is None:
                 raise RuntimeError("manifest not received")
-            output_path = restore_payload(payload_bytes, assembler.manifest, args.output_dir)
+            output_path = restore_payload(payload_bytes, assembler.manifest, config.output_dir)
             now = time.time()
             snap = pipeline.stats.snapshot()
             _sync_transfer_stats_from_pipeline(snap)
@@ -1280,7 +1282,7 @@ def main(argv=None):
             )
             final_report["status"] = "ok"
             final_report["output_path"] = output_path
-            _write_report(args.report_json, final_report)
+            _write_report(config.report_json, final_report)
             print("restore complete: {0}".format(output_path))
             print(
                 "summary captured={0} decoded={1} assembled={2} dropped={3}/{4}".format(
@@ -1325,7 +1327,7 @@ def main(argv=None):
                 report["status"] = "aborted"
                 if runtime_error is not None:
                     report["error"] = str(runtime_error)
-                _write_report(args.report_json, report)
+                _write_report(config.report_json, report)
         return 1
     # ── Legacy single-thread mode ────────────────────────────────────────────
 
@@ -1345,13 +1347,13 @@ def main(argv=None):
             )
             if (
                 (not replay_mode)
-                and args.detect_mode != "full"
+                and config.detect_mode != "full"
                 and v3_track_roi is None
                 and manual_decode_roi_local is not None
             ):
                 v3_track_roi = manual_decode_roi_local
 
-            if args.max_seconds > 0 and now - start > args.max_seconds:
+            if config.max_seconds > 0 and now - start > config.max_seconds:
                 final_report = cast(
                     Dict[str, object], dict(stats.finalize(output_size_bytes=0, ts=now))
                 )
@@ -1359,11 +1361,11 @@ def main(argv=None):
                 _attach_v3_metrics(final_report)
                 _attach_missing_chunks_state(final_report)
                 _attach_protocol_debug(final_report)
-                _write_report(args.report_json, final_report)
+                _write_report(config.report_json, final_report)
                 print("receiver timeout: max-seconds reached")
                 return 2
 
-            if now - last_good > args.max_idle_seconds:
+            if now - last_good > config.max_idle_seconds:
                 final_report = cast(
                     Dict[str, object], dict(stats.finalize(output_size_bytes=0, ts=now))
                 )
@@ -1371,8 +1373,8 @@ def main(argv=None):
                 _attach_v3_metrics(final_report)
                 _attach_missing_chunks_state(final_report)
                 _attach_protocol_debug(final_report)
-                _write_report(args.report_json, final_report)
-                print("receiver timeout: no valid frames for {0}s".format(args.max_idle_seconds))
+                _write_report(config.report_json, final_report)
+                print("receiver timeout: no valid frames for {0}s".format(config.max_idle_seconds))
                 return 2
 
             if threshold is None:
@@ -1383,7 +1385,7 @@ def main(argv=None):
             # manual mode selector on first frame if no roi yet.
             if roi_policy.mode == "manual" and forced_roi is None and roi_policy.interactive:
                 stats.mark_manual_select_attempt()
-                selected = select_region(get_monitor_region(args.monitor_index))
+                selected = select_region(get_monitor_region(config.monitor_index))
                 if selected is None:
                     raise RuntimeError("manual roi selection canceled")
                 forced_roi = ensure_roi_valid(selected)
@@ -1393,12 +1395,12 @@ def main(argv=None):
                 )
                 v3_track_roi = manual_decode_roi_local
                 stats.mark_manual_roi(switched=False)
-                if args.roi_profile:
-                    save_profile(args.roi_profile, forced_roi, args.monitor_index)
+                if config.roi_profile:
+                    save_profile(config.roi_profile, forced_roi, config.monitor_index)
 
             try:
                 t_decode0 = time.perf_counter()
-                if args.protocol in ("basic", "compact", "gray4", "layered"):
+                if config.protocol in ("basic", "compact", "gray4", "layered"):
                     layered_failure_trace = None
                     last_grid_exc = None
                     if replay_mode:
@@ -1414,15 +1416,15 @@ def main(argv=None):
                     )
                     roi_only = manual_strict
                     decode_fn = (
-                        decode_frame_layered if args.protocol == "layered" else
-                        decode_frame_gray4 if args.protocol == "gray4" else
-                        decode_frame_compact if args.protocol == "compact" else decode_frame_basic
+                        decode_frame_layered if config.protocol == "layered" else
+                        decode_frame_gray4 if config.protocol == "gray4" else
+                        decode_frame_compact if config.protocol == "compact" else decode_frame_basic
                     )
-                    guard_band, corner_size = _protocol_geometry(args.protocol)
+                    guard_band, corner_size = _protocol_geometry(config.protocol)
                     for gw, gh in grid_candidates:
                         decode_attempt_total += 1
                         try:
-                            if args.protocol == "layered" and layered_locked_geometry is not None:
+                            if config.protocol == "layered" and layered_locked_geometry is not None:
                                 lock_decode_mode_geometry_reuse += 1
                                 header, payload, meta31 = decode_frame_layered_with_geometry(
                                     frame=frame,
@@ -1454,8 +1456,8 @@ def main(argv=None):
                                     corner_size=corner_size,
                                     roi_only=roi_only,
                                     manual_strict=manual_strict,
-                                    locator_engine=args.locator_engine,
-                                    locator_confidence_threshold=args.locator_confidence_threshold,
+                                    locator_engine=config.locator_engine,
+                                    locator_confidence_threshold=config.locator_confidence_threshold,
                                 )
                                 reacquire_success_count += 1
                                 homography_rmse_reacquired_last = float(
@@ -1467,7 +1469,7 @@ def main(argv=None):
                             break
                         except Exception as grid_exc:  # noqa: PERF203
                             last_grid_exc = grid_exc
-                            if args.protocol == "layered" and layered_locked_geometry is not None:
+                            if config.protocol == "layered" and layered_locked_geometry is not None:
                                 geometry_reuse_fail_count += 1
                                 layered_locked_fail_streak += 1
                                 if layered_locked_fail_streak >= layered_locked_fail_reacquire_threshold:
@@ -1475,7 +1477,7 @@ def main(argv=None):
                                     layered_locked_fail_streak = 0
                                     layered_locked_geometry_age = 0
                                 continue
-                            if args.protocol == "layered":
+                            if config.protocol == "layered":
                                 reacquire_fail_count += 1
                             # Per-frame recovery: if track path fails, retry the same frame in full mode.
                             if not replay_mode and not manual_strict and v31_mode == "track":
@@ -1491,8 +1493,8 @@ def main(argv=None):
                                         corner_size=corner_size,
                                         roi_only=False,
                                         manual_strict=False,
-                                        locator_engine=args.locator_engine,
-                                        locator_confidence_threshold=args.locator_confidence_threshold,
+                                        locator_engine=config.locator_engine,
+                                        locator_confidence_threshold=config.locator_confidence_threshold,
                                     )
                                     decode_attempt_total += max(0, int(meta31.decode_attempts) - 1)
                                     grid_w, grid_h = gw, gh
@@ -1505,11 +1507,11 @@ def main(argv=None):
                     frame_v31_meta = meta31
                     last_v31_meta = meta31
                     protocol_report_adapter.accumulate_success(meta31)
-                    if args.protocol == "layered":
+                    if config.protocol == "layered":
                         trace = getattr(meta31, "control_trace", None)
                         if isinstance(trace, dict):
                             _accumulate_layered_control_trace(trace, is_failure=False)
-                    protocol_path_used = args.protocol
+                    protocol_path_used = config.protocol
                     last_det_bbox = meta31.det_bbox
                     last_det_confidence = float(meta31.det_confidence)
                     locator_new_fail_reason = meta31.new_fail_reason
@@ -1517,7 +1519,7 @@ def main(argv=None):
                     locator_legacy_used = bool(meta31.legacy_used)
                     locator_legacy_elapsed_ms = float(meta31.legacy_elapsed_ms)
                     v3_fail_streak = 0
-                    if args.protocol == "layered":
+                    if config.protocol == "layered":
                         geometry = LayeredProtocolDecoder.geometry_from_meta(meta31)
                         if geometry is not None:
                             layered_locked_geometry = geometry
@@ -1536,17 +1538,17 @@ def main(argv=None):
                             v3_track_roi = roi_mgr.build_track_roi(
                                 (bx, by, bw, bh),
                                 frame.shape,
-                                args.track_margin_px,
+                                config.track_margin_px,
                             )
-                    if args.detect_mode != "full" and not replay_mode:
+                    if config.detect_mode != "full" and not replay_mode:
                         v3_mode = "track"
                 else:
                     raise ValueError(
-                        f"Protocol '{args.protocol}' not supported, use 'basic', 'compact', 'gray4', or 'layered'"
+                        f"Protocol '{config.protocol}' not supported, use 'basic', 'compact', 'gray4', or 'layered'"
                     )
                 auto_fail_count = 0
                 last_decode_error = None
-                if args.protocol in ("gray4", "layered"):
+                if config.protocol in ("gray4", "layered"):
                     last_gray4_failure_error = None
                     last_gray4_failure_class = ""
                 if first_valid_frame_ts is None:
@@ -1575,7 +1577,7 @@ def main(argv=None):
                     pass
                 else:
                     last_decode_error = str(last_exc)
-                    if args.protocol in ("gray4", "layered"):
+                    if config.protocol in ("gray4", "layered"):
                         last_gray4_failure_error = last_decode_error
                         last_gray4_failure_class = _classify_gray4_decode_failure(last_decode_error)
                         protocol_report_adapter.accumulate_failure(
@@ -1587,7 +1589,7 @@ def main(argv=None):
                             gray4_failure_counts[last_gray4_failure_class] += 1
                         elif last_gray4_failure_class:
                             gray4_failure_counts["unknown"] += 1
-                        if args.protocol == "layered":
+                        if config.protocol == "layered":
                             layered_detail = _classify_layered_decode_failure_detail(last_decode_error)
                             if layered_detail in layered_failure_counts:
                                 layered_failure_counts[layered_detail] += 1
@@ -1597,7 +1599,7 @@ def main(argv=None):
                                 _accumulate_layered_control_trace(
                                     trace, is_failure=(layered_detail == "control_prefix")
                                 )
-                    if args.protocol in ("basic", "compact"):
+                    if config.protocol in ("basic", "compact"):
                         v3_fail_streak += 1
                         # Fast recovery: return to full search after a few consecutive misses.
                         if v3_fail_streak >= 3 and not replay_mode:
@@ -1621,7 +1623,7 @@ def main(argv=None):
                                 manual_attempts
                             )
                         )
-                        selected = select_region(get_monitor_region(args.monitor_index))
+                        selected = select_region(get_monitor_region(config.monitor_index))
                         if selected is not None:
                             forced_roi = ensure_roi_valid(selected)
                             stats.mark_manual_roi(switched=True)
@@ -1633,11 +1635,11 @@ def main(argv=None):
                             )
                             v3_track_roi = manual_decode_roi_local
                             auto_fail_count = 0
-                            if args.roi_profile:
-                                save_profile(args.roi_profile, forced_roi, args.monitor_index)
+                            if config.roi_profile:
+                                save_profile(config.roi_profile, forced_roi, config.monitor_index)
                     if now >= next_stats_ts:
                         _print_stats(stats.snapshot(ts=now), assembler.missing_count())
-                        next_stats_ts = now + max(0.1, args.stats_interval)
+                        next_stats_ts = now + max(0.1, config.stats_interval)
                     if debug_manager:
                         debug_manager.maybe_dump(
                             now=now,
@@ -1656,9 +1658,9 @@ def main(argv=None):
                                 "v31_meta": frame_v31_meta,
                                 "grid_w": grid_w,
                                 "grid_h": grid_h,
-                                "locator_confidence_threshold": args.locator_confidence_threshold,
+                                "locator_confidence_threshold": config.locator_confidence_threshold,
                                 "layered_failure_trace": layered_failure_trace,
-                                "protocol": args.protocol,
+                                "protocol": config.protocol,
                                 **_debug_control_plane_state(),
                             },
                         )
@@ -1682,9 +1684,9 @@ def main(argv=None):
                         "v31_meta": frame_v31_meta,
                         "grid_w": grid_w,
                         "grid_h": grid_h,
-                        "locator_confidence_threshold": args.locator_confidence_threshold,
+                        "locator_confidence_threshold": config.locator_confidence_threshold,
                         "layered_failure_trace": None,
-                        "protocol": args.protocol,
+                        "protocol": config.protocol,
                         **_debug_control_plane_state(),
                         "decoded_chunk_id": int(header.chunk_id),
                         "decoded_payload": payload,
@@ -1699,7 +1701,7 @@ def main(argv=None):
                 stats.on_frame(decoded_ok=True, payload_len=0, ts=now)
                 if now >= next_stats_ts:
                     _print_stats(stats.snapshot(ts=now), assembler.missing_count())
-                    next_stats_ts = now + max(0.1, args.stats_interval)
+                    next_stats_ts = now + max(0.1, config.stats_interval)
                 continue
 
             last_good = now
@@ -1723,13 +1725,13 @@ def main(argv=None):
 
             if now >= next_stats_ts:
                 _print_stats(stats.snapshot(ts=now), assembler.missing_count())
-                next_stats_ts = now + max(0.1, args.stats_interval)
+                next_stats_ts = now + max(0.1, config.stats_interval)
 
             if assembler.complete():
                 payload_bytes = assembler.payload()
                 if assembler.manifest is None:
                     continue
-                output_path = restore_payload(payload_bytes, assembler.manifest, args.output_dir)
+                output_path = restore_payload(payload_bytes, assembler.manifest, config.output_dir)
                 final_report = cast(
                     Dict[str, object],
                     dict(stats.finalize(output_size_bytes=len(payload_bytes), ts=time.time())),
@@ -1803,7 +1805,7 @@ def main(argv=None):
                         "w": capture_region[2],
                         "h": capture_region[3],
                     }
-                _write_report(args.report_json, final_report)
+                _write_report(config.report_json, final_report)
                 print("restore complete: {0}".format(output_path))
                 print(
                     "summary goodput_KiBps={0:.2f} end_to_end_KiBps={1:.2f} bad_frame_rate={2:.4f} recovery_latency_s={3:.3f}".format(
@@ -1831,7 +1833,7 @@ def main(argv=None):
             failure_counts=gray4_failure_counts,
         )
         _attach_protocol_debug(final_report)
-        _write_report(args.report_json, final_report)
+        _write_report(config.report_json, final_report)
         print("receiver ended: source exhausted")
         return 1
     finally:
@@ -1851,7 +1853,7 @@ def main(argv=None):
                 failure_counts=gray4_failure_counts,
             )
             _attach_protocol_debug(report)
-            _write_report(args.report_json, report)
+            _write_report(config.report_json, report)
 
 
 if __name__ == "__main__":
