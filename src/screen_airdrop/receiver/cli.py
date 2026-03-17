@@ -54,8 +54,8 @@ from screen_airdrop.receiver.roi import RoiManager, ensure_roi_valid
 # Configuration
 from screen_airdrop.receiver.config import ReceiverConfig
 
-# Reporting (for future refactoring)
-# from screen_airdrop.receiver.reporting import MetricsState, ReportBuilder
+# Reporting
+from screen_airdrop.receiver.reporting import MetricsState, ReportBuilder
 
 
 def _parse_region(raw: Optional[str]) -> Optional[Tuple[int, int, int, int]]:

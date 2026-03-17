@@ -4,7 +4,7 @@ This module provides report building functionality, replacing the nested
 _attach_* functions in cli.py main().
 """
 
-from typing import Dict, Mapping, Optional
+from typing import Dict, Mapping, Optional, cast
 
 from screen_airdrop.common.ecc_rs import LAYERED_BOOTSTRAP_RS
 from screen_airdrop.common.protocol_layered import layered_bootstrap_payload_size_bytes
@@ -45,17 +45,74 @@ class ReportBuilder:
     providing a cleaner interface for report generation.
     """
 
-    def __init__(self, metrics_state, stats, debug_manager=None):
+    def __init__(self, metrics_state, stats, protocol_report_adapter=None, debug_manager=None):
         """Initialize report builder.
 
         Args:
             metrics_state: MetricsState instance
             stats: TransferStats instance
+            protocol_report_adapter: Optional protocol report adapter
             debug_manager: Optional DebugSnapshotManager instance
         """
         self.m = metrics_state
         self.stats = stats
+        self.protocol_report_adapter = protocol_report_adapter
         self.debug_manager = debug_manager
+
+    def build_final_report(
+        self,
+        *,
+        output_size_bytes: int,
+        ts: float,
+        status: str = "ok",
+        output_path: str = "",
+        assembler=None,
+        pipeline_snap: Optional[Mapping[str, object]] = None,
+    ) -> Dict[str, object]:
+        """Build complete final report with all metrics.
+
+        Args:
+            output_size_bytes: Size of output payload in bytes
+            ts: Timestamp for finalization
+            status: Report status (ok, timeout_max_seconds, timeout_idle, aborted)
+            output_path: Path to output file (if successful)
+            assembler: ChunkAssembler instance (for control plane state)
+            pipeline_snap: Optional pipeline stats snapshot
+
+        Returns:
+            Complete report dictionary
+        """
+        # Start with base stats
+        report = cast(Dict[str, object], dict(self.stats.finalize(output_size_bytes, ts)))
+        report["status"] = status
+        if output_path:
+            report["output_path"] = output_path
+
+        # Attach all metrics
+        if pipeline_snap is not None:
+            self.sync_transfer_stats_from_pipeline(pipeline_snap)
+            self.attach_pipeline_metrics(report, pipeline_snap)
+        else:
+            self.attach_v3_metrics(report)
+
+        if assembler is not None:
+            self.attach_control_plane_state(report, assembler)
+            self.attach_missing_chunks_state(report, assembler)
+
+        self.attach_gray4_state(
+            report,
+            failure_error=self.m.last_gray4_failure_error,
+            failure_class=self.m.last_gray4_failure_class,
+            success_meta=self.m.last_v31_meta,
+            failure_counts=self.m.gray4_failure_counts,
+        )
+
+        if self.protocol_report_adapter:
+            report.update(self.protocol_report_adapter.finalize_summary())
+
+        self.attach_startup_state(report)
+
+        return report
 
     def attach_v3_metrics(self, report: Dict[str, object]) -> None:
         """Attach V3 decode metrics to report.
