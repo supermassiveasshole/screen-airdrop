@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import TYPE_CHECKING, Optional, Tuple
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from screen_airdrop.receiver.frame_locator import FrameLocator
+    from screen_airdrop.receiver.locator_basic import LocateError, LocateResult
 
 
 @dataclass(frozen=True)
@@ -35,15 +39,18 @@ class GeometryTracker:
     def __init__(
         self,
         *,
+        locator: "FrameLocator",
         locator_confidence_threshold: float = 0.55,
         lock_fail_reacquire_threshold: int = 5,
     ):
         """Initialize geometry tracker.
 
         Args:
+            locator: FrameLocator instance for ROI tracking
             locator_confidence_threshold: Minimum quality score to accept geometry
             lock_fail_reacquire_threshold: Consecutive failures before reacquire
         """
+        self._locator = locator
         self._locator_confidence_threshold = locator_confidence_threshold
         self._lock_fail_reacquire_threshold = lock_fail_reacquire_threshold
 
@@ -113,11 +120,25 @@ class GeometryTracker:
 
         return True
 
-    def record_success(self) -> None:
-        """Record successful decode, reset failure streak."""
+    def record_success(
+        self,
+        *,
+        geometry: Optional[GeometryState] = None,
+        bbox: Optional[Tuple[int, int, int, int]] = None,
+    ) -> None:
+        """Record successful decode, reset failure streak.
+
+        Args:
+            geometry: Optional geometry state (for propose_update compatibility)
+            bbox: Optional detection bbox for ROI update
+        """
         self._geometry_fail_streak = 0
         if self._lock_mode == "locked":
             self._locked_geometry_age += 1
+
+        # Update ROI tracking if bbox provided
+        if bbox is not None:
+            self._locator.update_roi_from_bbox(bbox)
 
     def record_failure(self) -> bool:
         """Record failed decode, increment failure streak.
@@ -153,3 +174,28 @@ class GeometryTracker:
     def get_locked_geometry_age(self) -> int:
         """Get age of locked geometry (frames since lock)."""
         return self._locked_geometry_age
+
+    def get_current_roi(self) -> Optional[Tuple[int, int, int, int]]:
+        """Get current tracking ROI from locator.
+
+        Returns:
+            Current ROI (x, y, w, h) or None
+        """
+        return self._locator.get_current_roi()
+
+    def locate_frame(self, frame: np.ndarray) -> "LocateResult | LocateError":
+        """Run locator (only in acquire mode).
+
+        Args:
+            frame: Input frame
+
+        Returns:
+            LocateResult on success, LocateError on failure
+
+        Raises:
+            RuntimeError: If called in locked mode
+        """
+        if self._lock_mode != "acquire":
+            raise RuntimeError("Cannot locate in locked mode")
+        return self._locator.locate(frame)
+

@@ -17,6 +17,7 @@ from screen_airdrop.common.control_plane import control_kind_from_wire_chunk_id
 from screen_airdrop.common.protocol_basic import DEFAULT_GRID_H, DEFAULT_GRID_W, FRAME_DATA
 from screen_airdrop.receiver.assembler import ChunkAssembler
 from screen_airdrop.receiver.capture_mss import get_monitor_region
+from screen_airdrop.receiver.locator_basic import LocateError
 from screen_airdrop.receiver.protocol_observability import make_protocol_report_adapter
 from screen_airdrop.receiver.runtime.events import (
     DecodeAssignment,
@@ -126,8 +127,7 @@ class ScreenLiveRuntime:
         grid_h: int = DEFAULT_GRID_H,
         guard_band: int = 2,
         corner_size: int = 9,
-        locator_engine: str = "auto",
-        locator_confidence_threshold: float = 0.55,
+        manual_mode: bool = False,
         decode_workers: int = 1,
         capture_fps: float = 30.0,
         capture_dump_dir: Optional[str] = None,
@@ -145,8 +145,7 @@ class ScreenLiveRuntime:
         self._grid_h = grid_h
         self._guard_band = guard_band
         self._corner_size = corner_size
-        self._locator_engine = locator_engine
-        self._locator_confidence_threshold = locator_confidence_threshold
+        self._manual_mode = manual_mode
         self._decode_workers = max(1, int(decode_workers))
         self._capture_fps = capture_fps
         self._prep_processes = int(prep_process)
@@ -197,8 +196,50 @@ class ScreenLiveRuntime:
             frame_height=self._height,
         )
         self._slot_registry = SlotManager([slot.name for slot in self._slots])
+
+        # Create locator function based on mode
+        from screen_airdrop.receiver.frame_locator import FrameLocator
+        from screen_airdrop.receiver.locator_basic import locate_frame, locate_frame_legacy
+
+        if self._manual_mode:
+            # Manual mode: use lightweight locator
+            locator_func = locate_frame_legacy
+        else:
+            # Auto mode: use precise locator with fallback
+            def auto_locator_with_fallback(
+                frame,
+                search_roi,
+                grid_w,
+                grid_h,
+                guard_band,
+                corner_size,
+            ):
+                # Try precise locator first
+                result = locate_frame(frame, search_roi, grid_w, grid_h, guard_band, corner_size)
+
+                # Fallback to lightweight if failed or low confidence
+                if isinstance(result, LocateError) or result.quality.confidence < 0.55:
+                    return locate_frame_legacy(frame, search_roi, grid_w, grid_h, guard_band, corner_size)
+
+                return result
+
+            locator_func = auto_locator_with_fallback
+
+        # Create FrameLocator
+        locator = FrameLocator(
+            locator_func=locator_func,
+            grid_w=self._grid_w,
+            grid_h=self._grid_h,
+            guard_band=self._guard_band,
+            corner_size=self._corner_size,
+            initial_roi=self._initial_search_roi,
+            fixed_roi=self._manual_mode,
+        )
+
+        # Create GeometryTracker with integrated locator
         self._geometry_tracker = GeometryTracker(
-            locator_confidence_threshold=self._locator_confidence_threshold,
+            locator=locator,
+            locator_confidence_threshold=0.55,
             lock_fail_reacquire_threshold=5,
         )
         self._last_fingerprint: Optional[bytes] = None
@@ -301,8 +342,6 @@ class ScreenLiveRuntime:
                     "grid_h": self._grid_h,
                     "guard_band": self._guard_band,
                     "corner_size": self._corner_size,
-                    "locator_engine": self._locator_engine,
-                    "locator_confidence_threshold": self._locator_confidence_threshold,
                 },
                 daemon=True,
                 name=f"ScreenLiveDecode-{worker_id}",

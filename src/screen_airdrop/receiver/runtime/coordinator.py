@@ -341,7 +341,7 @@ class RuntimeCoordinator:
             decode_owner=f"decode:{worker_id}",
             dump_requested=descriptor.dump_requested,
             geometry_state=self._geometry_tracker.current_geometry,
-            forced_roi=None,
+            forced_roi=self._geometry_tracker.get_current_roi(),
         )
 
     def _handle_decode_result(self, item: object) -> None:
@@ -400,7 +400,12 @@ class RuntimeCoordinator:
                 used_geometry_generation=completion.used_geometry_generation,
             )
 
-        self._geometry_tracker.record_success()
+        # Extract bbox and update ROI
+        bbox = completion.meta.det_bbox if hasattr(completion, "meta") and hasattr(completion.meta, "det_bbox") else None
+        self._geometry_tracker.record_success(
+            geometry=completion.proposed_geometry_state,
+            bbox=bbox,
+        )
 
         # Assemble chunk
         if completion.frame_type == 1:  # FRAME_DATA

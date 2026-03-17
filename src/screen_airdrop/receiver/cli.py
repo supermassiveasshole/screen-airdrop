@@ -1761,6 +1761,10 @@ def main(argv=None):
         grid_w, grid_h = _parse_module_grid(args.module_grid)
         guard_band, corner_size = _protocol_geometry(args.protocol)
         pipeline_seed_roi_local = _build_pipeline_seed_roi_local(source, forced_roi)
+
+        # Infer manual mode from ROI presence
+        manual_mode = bool(args.roi or args.roi_interactive)
+
         pipeline = ScreenLiveRuntime(
             capture=source,
             assembler=assembler,
@@ -1774,8 +1778,7 @@ def main(argv=None):
             grid_h=grid_h,
             guard_band=guard_band,
             corner_size=corner_size,
-            locator_engine=args.locator_engine,
-            locator_confidence_threshold=args.locator_confidence_threshold,
+            manual_mode=manual_mode,
             initial_search_roi=pipeline_seed_roi_local,
         )
         print(

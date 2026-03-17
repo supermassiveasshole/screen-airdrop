@@ -79,8 +79,6 @@ def _make_decoder(
     grid_h: int,
     guard_band: int,
     corner_size: int,
-    locator_engine: str,
-    locator_confidence_threshold: float,
 ) -> Any:
     if protocol == "basic":
         return BasicProtocolDecoder(
@@ -88,8 +86,6 @@ def _make_decoder(
             grid_h=grid_h,
             guard_band=guard_band,
             corner_size=corner_size,
-            locator_engine=locator_engine,
-            locator_confidence_threshold=locator_confidence_threshold,
         )
     if protocol == "compact":
         return CompactProtocolDecoder(
@@ -97,8 +93,6 @@ def _make_decoder(
             grid_h=grid_h,
             guard_band=guard_band,
             corner_size=corner_size,
-            locator_engine=locator_engine,
-            locator_confidence_threshold=locator_confidence_threshold,
         )
     if protocol == "gray4":
         return Gray4ProtocolDecoder(
@@ -106,8 +100,6 @@ def _make_decoder(
             grid_h=grid_h,
             guard_band=guard_band,
             corner_size=corner_size,
-            locator_engine=locator_engine,
-            locator_confidence_threshold=locator_confidence_threshold,
         )
     if protocol == "layered":
         return LayeredProtocolDecoder(
@@ -115,8 +107,6 @@ def _make_decoder(
             grid_h=grid_h,
             guard_band=guard_band,
             corner_size=corner_size,
-            locator_engine=locator_engine,
-            locator_confidence_threshold=locator_confidence_threshold,
         )
     raise ValueError(f"Unknown protocol: {protocol}")
 
@@ -375,8 +365,6 @@ def _decode_worker_main(
     grid_h: int,
     guard_band: int,
     corner_size: int,
-    locator_engine: str,
-    locator_confidence_threshold: float,
 ) -> None:
     _ignore_sigint_in_child()
     shms: List[shared_memory.SharedMemory] = []
@@ -387,8 +375,6 @@ def _decode_worker_main(
         grid_h=grid_h,
         guard_band=guard_band,
         corner_size=corner_size,
-        locator_engine=locator_engine,
-        locator_confidence_threshold=locator_confidence_threshold,
     )
     try:
         for name in slot_names:

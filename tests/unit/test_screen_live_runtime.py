@@ -71,8 +71,22 @@ def test_slot_registry_holds_release_until_dump_reader_clears() -> None:
 
 def test_runtime_rejects_stale_geometry_update() -> None:
     from screen_airdrop.receiver.runtime.geometry_tracker import GeometryTracker
+    from screen_airdrop.receiver.frame_locator import FrameLocator
+    from screen_airdrop.receiver.locator_basic import locate_frame_legacy
+
+    # Create a mock locator
+    locator = FrameLocator(
+        locator_func=locate_frame_legacy,
+        grid_w=32,
+        grid_h=18,
+        guard_band=2,
+        corner_size=9,
+        initial_roi=None,
+        fixed_roi=False,
+    )
 
     tracker = GeometryTracker(
+        locator=locator,
         locator_confidence_threshold=0.55,
         lock_fail_reacquire_threshold=5,
     )
