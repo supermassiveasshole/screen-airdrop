@@ -45,6 +45,9 @@ from screen_airdrop.receiver.screen_live_runtime import ScreenLiveRuntime
 from screen_airdrop.receiver.stats import TransferStats
 from screen_airdrop.receiver.window_locator import resolve_window_region
 
+# Debug utilities
+from screen_airdrop.receiver.debug import DebugSnapshotManager
+
 
 def _parse_region(raw: Optional[str]) -> Optional[Tuple[int, int, int, int]]:
     if not raw:
@@ -442,727 +445,6 @@ def _should_use_pipeline(
     )
 
 
-def _draw_rect(
-    frame: np.ndarray,
-    rect: Tuple[int, int, int, int],
-    color: Tuple[int, int, int],
-    thickness: int = 2,
-) -> None:
-    x, y, w, h = rect
-    x1 = max(0, int(x))
-    y1 = max(0, int(y))
-    x2 = min(frame.shape[1] - 1, int(x + w))
-    y2 = min(frame.shape[0] - 1, int(y + h))
-    if x1 >= x2 or y1 >= y2:
-        return
-    frame[y1 : min(frame.shape[0], y1 + thickness), x1:x2] = color
-    frame[max(0, y2 - thickness) : y2, x1:x2] = color
-    frame[y1:y2, x1 : min(frame.shape[1], x1 + thickness)] = color
-    frame[y1:y2, max(0, x2 - thickness) : x2] = color
-
-
-def _draw_quad(
-    frame: np.ndarray,
-    quad: Tuple[Tuple[float, float], Tuple[float, float], Tuple[float, float], Tuple[float, float]],
-    color: Tuple[int, int, int],
-    thickness: int = 2,
-) -> None:
-    pts = [(int(round(p[0])), int(round(p[1]))) for p in quad]
-    h, w = frame.shape[:2]
-    for i in range(4):
-        x1, y1 = pts[i]
-        x2, y2 = pts[(i + 1) % 4]
-        steps = max(abs(x2 - x1), abs(y2 - y1), 1)
-        for s in range(steps + 1):
-            x = int(round(x1 + (x2 - x1) * (s / float(steps))))
-            y = int(round(y1 + (y2 - y1) * (s / float(steps))))
-            x = max(0, min(w - 1, x))
-            y = max(0, min(h - 1, y))
-            y0 = max(0, y - thickness // 2)
-            y1b = min(h, y0 + thickness)
-            x0 = max(0, x - thickness // 2)
-            x1b = min(w, x0 + thickness)
-            frame[y0:y1b, x0:x1b] = color
-
-
-def _save_debug_image(path: str, frame: np.ndarray) -> None:
-    try:
-        import cv2  # pylint: disable=import-outside-toplevel
-
-        if cv2.imwrite(path, frame):
-            return
-    except Exception:
-        pass
-    np.save(path + ".npy", frame)
-
-
-def _append_jsonl(path: str, record: Dict[str, Any]) -> None:
-    directory = os.path.dirname(path)
-    if directory:
-        os.makedirs(directory, exist_ok=True)
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
-
-
-def _write_debug_sidecar(path: str, record: Dict[str, Any]) -> None:
-    directory = os.path.dirname(path)
-    if directory:
-        os.makedirs(directory, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(record, f, ensure_ascii=False, indent=2)
-
-
-def _load_json_dict(path: str) -> Dict[str, Any]:
-    if not os.path.exists(path):
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
-def _increment_counter(bucket: Dict[str, Any], key: str) -> None:
-    bucket[key] = int(bucket.get(key, 0)) + 1
-
-
-def _update_debug_summary(debug_dir: str, meta: Dict[str, Any]) -> None:
-    path = os.path.join(debug_dir, "summary.json")
-    summary = _load_json_dict(path)
-    summary["total_frames"] = int(summary.get("total_frames", 0)) + 1
-    planes = summary.get("planes")
-    if not isinstance(planes, dict):
-        planes = {}
-        summary["planes"] = planes
-    control_kinds = summary.get("control_kinds")
-    if not isinstance(control_kinds, dict):
-        control_kinds = {}
-        summary["control_kinds"] = control_kinds
-    protocols = summary.get("protocol_paths")
-    if not isinstance(protocols, dict):
-        protocols = {}
-        summary["protocol_paths"] = protocols
-
-    plane = str(meta.get("decoded_plane", "unknown") or "unknown")
-    _increment_counter(planes, plane)
-    _increment_counter(protocols, str(meta.get("protocol_path_used", "unknown") or "unknown"))
-    control_kind = str(meta.get("decoded_control_kind", "") or "")
-    if control_kind:
-        _increment_counter(control_kinds, control_kind)
-
-    _write_debug_sidecar(path, summary)
-
-
-def _record_debug_indexes(debug_dir: str, frame_index: int, meta: Dict[str, Any]) -> None:
-    frame_base = "frame_{0:05d}".format(frame_index)
-    plane = str(meta.get("decoded_plane", "unknown") or "unknown")
-    control_kind = str(meta.get("decoded_control_kind", "") or "")
-    control_family = str(meta.get("decoded_control_family", "") or "")
-    record = {
-        "frame_index": int(frame_index),
-        "plane": plane,
-        "control_family": control_family,
-        "control_kind": control_kind,
-        "protocol_path_used": str(meta.get("protocol_path_used", "")),
-        "decode_error": str(meta.get("decode_error", "")),
-        "frame_json": frame_base + ".json",
-        "frame_dir": frame_base,
-    }
-    _append_jsonl(os.path.join(debug_dir, "index_all.jsonl"), record)
-    _append_jsonl(os.path.join(debug_dir, "by_plane", plane, "index.jsonl"), record)
-    _write_debug_sidecar(
-        os.path.join(debug_dir, "by_plane", plane, frame_base + ".json"),
-        record,
-    )
-    if control_kind:
-        _append_jsonl(
-            os.path.join(debug_dir, "by_control_kind", control_kind, "index.jsonl"),
-            record,
-        )
-        _write_debug_sidecar(
-            os.path.join(debug_dir, "by_control_kind", control_kind, frame_base + ".json"),
-            record,
-        )
-    _update_debug_summary(debug_dir, meta)
-
-
-def _init_debug_meta(
-    frame: np.ndarray,
-    frame_index: int,
-    threshold: int,
-    capture_region: Optional[Tuple[int, int, int, int]],
-    forced_roi_abs: Optional[Tuple[int, int, int, int]],
-    forced_roi_local: Optional[Tuple[int, int, int, int]],
-    decode_error: Optional[str],
-    selected_block_size: Optional[int],
-    protocol_path_used: str,
-    detect_mode_used: str,
-    det_confidence: float,
-    decode_attempt_total: int,
-    fallback_hits: int,
-) -> Dict[str, Any]:
-    return {
-        "frame_index": frame_index,
-        "frame_shape": [int(frame.shape[1]), int(frame.shape[0])],
-        "threshold": int(threshold),
-        "capture_region": capture_region,
-        "forced_roi_abs": forced_roi_abs,
-        "forced_roi_local": forced_roi_local,
-        "decode_error": decode_error or "",
-        "selected_block_size": selected_block_size if selected_block_size is not None else 0,
-        "protocol_path_used": protocol_path_used,
-        "detect_mode_used": detect_mode_used,
-        "det_confidence": float(det_confidence),
-        "decode_attempt_total": int(decode_attempt_total),
-        "fallback_hits": int(fallback_hits),
-        # Protocol-standard per-frame fields (always present).
-        "locator_engine": "",
-        "roi_offset": [0, 0],
-        "finder_candidates": [],
-        "quad_src": [],
-        "warp_rmse": 0.0,
-        "timing_score": 0.0,
-        "confidence": 0.0,
-        "fail_reason": "",
-        "elapsed_ms": 0.0,
-        "legacy_used": False,
-        "legacy_elapsed_ms": 0.0,
-        "new_fail_reason": "",
-        "new_elapsed_ms": 0.0,
-        "gray4_failure_class": _classify_gray4_decode_failure(decode_error),
-        "gray4_mask_id": -1,
-        "gray4_avg_symbol_confidence": 0.0,
-        "gray4_payload_low_conf_symbols": 0,
-        "gray4_payload_variant_attempts": 0,
-        "layered_bootstrap_attempt_count": 0,
-        "layered_bootstrap_threshold": 0,
-        "layered_bootstrap_vote_margin_min": 0.0,
-        "layered_bootstrap_vote_margin_avg": 0.0,
-        "layered_control_band_decode_stage": "",
-        "layered_control_trace": {},
-        "layered_format_attempt_count": 0,
-        "layered_format_fallback_attempts": 0,
-        "layered_format_fallback_successes": 0,
-        "layered_format_primary_threshold": 0,
-        "layered_format_primary_threshold_mode": "",
-        "layered_format_fallback_threshold": -1,
-        "layered_format_vote_margin_min": 0.0,
-        "layered_format_vote_margin_avg": 0.0,
-        "layered_format_repetition_level": 0,
-        "layered_format_coords_count": 0,
-        "layered_format_mask_id_guess": -1,
-        "layered_format_trace": {},
-    }
-
-
-def _apply_v31_meta_to_debug(
-    meta: Dict[str, Any],
-    v31_meta: object,
-) -> Dict[str, Any]:
-    meta["locator_engine"] = getattr(v31_meta, "locator_engine", "")
-    meta["new_fail_reason"] = getattr(v31_meta, "new_fail_reason", "")
-    meta["new_elapsed_ms"] = float(getattr(v31_meta, "new_elapsed_ms", 0.0))
-    meta["legacy_used"] = bool(getattr(v31_meta, "legacy_used", False))
-    meta["legacy_elapsed_ms"] = float(getattr(v31_meta, "legacy_elapsed_ms", 0.0))
-    meta["confidence"] = float(getattr(v31_meta, "confidence", 0.0))
-    meta["fail_reason"] = getattr(v31_meta, "fail_reason", "")
-    meta["elapsed_ms"] = float(getattr(v31_meta, "elapsed_ms", 0.0))
-    meta["gray4_mask_id"] = int(getattr(v31_meta, "mask_id", -1))
-    meta["gray4_avg_symbol_confidence"] = float(
-        getattr(v31_meta, "avg_symbol_confidence", 0.0)
-    )
-    meta["gray4_payload_low_conf_symbols"] = int(
-        getattr(v31_meta, "payload_low_conf_symbols", 0)
-    )
-    meta["gray4_payload_variant_attempts"] = int(
-        getattr(v31_meta, "payload_variant_attempts", 0)
-    )
-    meta["layered_bootstrap_attempt_count"] = int(getattr(v31_meta, "bootstrap_attempt_count", 0))
-    meta["layered_bootstrap_threshold"] = int(getattr(v31_meta, "bootstrap_threshold", 0))
-    meta["layered_bootstrap_vote_margin_min"] = float(
-        getattr(v31_meta, "bootstrap_vote_margin_min", 0.0)
-    )
-    meta["layered_bootstrap_vote_margin_avg"] = float(
-        getattr(v31_meta, "bootstrap_vote_margin_avg", 0.0)
-    )
-    meta["layered_control_band_decode_stage"] = str(
-        getattr(v31_meta, "control_band_decode_stage", "")
-    )
-    control_trace = getattr(v31_meta, "control_trace", None)
-    if isinstance(control_trace, dict):
-        meta["layered_control_trace"] = control_trace
-    meta["layered_format_attempt_count"] = int(getattr(v31_meta, "format_attempt_count", 0))
-    meta["layered_format_fallback_attempts"] = int(
-        getattr(v31_meta, "format_fallback_attempts", 0)
-    )
-    meta["layered_format_fallback_successes"] = int(
-        getattr(v31_meta, "format_fallback_successes", 0)
-    )
-    meta["layered_format_primary_threshold"] = int(
-        getattr(v31_meta, "format_primary_threshold", 0)
-    )
-    meta["layered_format_primary_threshold_mode"] = str(
-        getattr(v31_meta, "format_primary_threshold_mode", "")
-    )
-    meta["layered_format_fallback_threshold"] = int(
-        getattr(v31_meta, "format_fallback_threshold", -1)
-    )
-    meta["layered_format_vote_margin_min"] = float(
-        getattr(v31_meta, "format_vote_margin_min", 0.0)
-    )
-    meta["layered_format_vote_margin_avg"] = float(
-        getattr(v31_meta, "format_vote_margin_avg", 0.0)
-    )
-    meta["layered_format_repetition_level"] = int(
-        getattr(v31_meta, "format_repetition_level", 0)
-    )
-    meta["layered_format_coords_count"] = int(getattr(v31_meta, "format_coords_count", 0))
-    meta["layered_format_mask_id_guess"] = int(getattr(v31_meta, "format_mask_id_guess", -1))
-    locator_debug = getattr(v31_meta, "locator_debug_artifacts", None)
-    if isinstance(locator_debug, dict):
-        if (
-            isinstance(locator_debug.get("roi_offset"), list)
-            and len(locator_debug["roi_offset"]) == 2
-        ):
-            meta["roi_offset"] = [
-                int(locator_debug["roi_offset"][0]),
-                int(locator_debug["roi_offset"][1]),
-            ]
-        for key in (
-            "finder_candidates",
-            "quad_src",
-            "warp_rmse",
-            "timing_score",
-            "confidence",
-            "fail_reason",
-        ):
-            if key in locator_debug:
-                meta[key] = locator_debug[key]
-    return locator_debug if isinstance(locator_debug, dict) else {}
-
-
-def _probe_locator_debug(
-    meta: Dict[str, Any],
-    frame: np.ndarray,
-    track_roi_local: Optional[Tuple[int, int, int, int]],
-    forced_roi_local: Optional[Tuple[int, int, int, int]],
-    grid_w: int,
-    grid_h: int,
-    locator_confidence_threshold: float,
-) -> Dict[str, Any]:
-    probe_roi = track_roi_local if track_roi_local is not None else forced_roi_local
-    loc_cfg = LocatorConfig(
-        grid_w=int(grid_w),
-        grid_h=int(grid_h),
-        confidence_threshold=float(locator_confidence_threshold),
-    )
-    loc = locate_frame(frame=frame, search_roi=probe_roi, config=loc_cfg)
-    if isinstance(loc, LocateErrorV31):
-        meta["locator_engine"] = "new"
-        meta["fail_reason"] = loc.fail_reason.value
-        meta["elapsed_ms"] = float(loc.elapsed_ms)
-        ldbg = loc.debug_artifacts if isinstance(loc.debug_artifacts, dict) else {}
-    else:
-        meta["locator_engine"] = "new"
-        meta["confidence"] = float(loc.quality.confidence)
-        meta["timing_score"] = float(loc.quality.timing_score)
-        meta["warp_rmse"] = float(loc.quality.warp_rmse)
-        meta["fail_reason"] = "" if loc.fail_reason is None else loc.fail_reason.value
-        meta["elapsed_ms"] = float(loc.elapsed_ms)
-        ldbg = loc.debug_artifacts if isinstance(loc.debug_artifacts, dict) else {}
-    if isinstance(ldbg.get("roi_offset"), list) and len(ldbg["roi_offset"]) == 2:
-        meta["roi_offset"] = [int(ldbg["roi_offset"][0]), int(ldbg["roi_offset"][1])]
-    if isinstance(ldbg.get("finder_candidates"), list):
-        meta["finder_candidates"] = ldbg["finder_candidates"]
-    if isinstance(ldbg.get("quad_src"), list):
-        meta["quad_src"] = ldbg["quad_src"]
-    return ldbg
-
-
-def _probe_compact_debug(
-    meta: Dict[str, Any],
-    frame: np.ndarray,
-    track_roi_local: Optional[Tuple[int, int, int, int]],
-    forced_roi_local: Optional[Tuple[int, int, int, int]],
-) -> Dict[str, Any]:
-    def _resolve_bbox(
-        view: np.ndarray, allow_full_frame: bool
-    ) -> Optional[Tuple[int, int, int, int]]:
-        bbox = _bbox_from_non_black(view)
-        if bbox is not None:
-            return bbox
-        det = detect_symbol_bbox(view)
-        if det is not None:
-            return det.bbox
-        if allow_full_frame:
-            h, w = view.shape[:2]
-            if w >= 64 and h >= 64:
-                return (0, 0, int(w), int(h))
-        return None
-
-    probe_roi = track_roi_local if track_roi_local is not None else forced_roi_local
-    if probe_roi is not None:
-        x, y, w, h = probe_roi
-        x1 = max(0, int(x))
-        y1 = max(0, int(y))
-        x2 = min(frame.shape[1], int(x + w))
-        y2 = min(frame.shape[0], int(y + h))
-        if x1 < x2 and y1 < y2:
-            view = frame[y1:y2, x1:x2]
-            bbox = _resolve_bbox(view, allow_full_frame=True)
-            if bbox is not None:
-                bx, by, bw, bh = bbox
-                mapped = (x1 + bx, y1 + by, bw, bh)
-                meta["locator_engine"] = "bbox"
-                meta["finder_candidates"] = [{"bbox": [int(v) for v in mapped], "score": 0.85}]
-                meta["confidence"] = 0.85
-                meta["fail_reason"] = ""
-                return {"finder_candidates": meta["finder_candidates"]}
-    bbox = _resolve_bbox(frame, allow_full_frame=False)
-    if bbox is not None:
-        meta["locator_engine"] = "bbox"
-        meta["finder_candidates"] = [{"bbox": [int(v) for v in bbox], "score": 0.85}]
-        meta["confidence"] = 0.85
-        meta["fail_reason"] = ""
-        return {"finder_candidates": meta["finder_candidates"]}
-    meta["locator_engine"] = "bbox"
-    meta["fail_reason"] = "NO_FINDER"
-    return {}
-
-
-def _dump_debug_snapshot(
-    debug_dir: str,
-    frame_index: int,
-    frame: np.ndarray,
-    threshold: int,
-    forced_roi_local: Optional[Tuple[int, int, int, int]],
-    forced_roi_abs: Optional[Tuple[int, int, int, int]],
-    capture_region: Optional[Tuple[int, int, int, int]],
-    decode_error: Optional[str],
-    selected_block_size: Optional[int],
-    protocol_path_used: str,
-    detect_mode_used: str,
-    track_roi_local: Optional[Tuple[int, int, int, int]],
-    det_bbox_local: Optional[Tuple[int, int, int, int]],
-    det_confidence: float,
-    decode_attempt_total: int,
-    fallback_hits: int,
-    manual_strict: bool = False,
-    v31_meta: Optional[object] = None,
-    grid_w: int = 160,
-    grid_h: int = 96,
-    locator_confidence_threshold: float = 0.55,
-    control_plane_kinds: Optional[list[str]] = None,
-    control_session: Optional[Dict[str, object]] = None,
-    control_layout: Optional[Dict[str, object]] = None,
-    control_generation: Optional[Dict[str, object]] = None,
-    control_generations_seen: Optional[list[int]] = None,
-    decoded_chunk_id: Optional[int] = None,
-    decoded_payload: Optional[bytes] = None,
-    layered_failure_trace: Optional[Dict[str, object]] = None,
-) -> None:
-    os.makedirs(debug_dir, exist_ok=True)
-    raw = frame.copy()
-    canvas = frame.copy()
-    meta = _init_debug_meta(
-        frame=frame,
-        frame_index=frame_index,
-        threshold=threshold,
-        capture_region=capture_region,
-        forced_roi_abs=forced_roi_abs,
-        forced_roi_local=forced_roi_local,
-        decode_error=decode_error,
-        selected_block_size=selected_block_size,
-        protocol_path_used=protocol_path_used,
-        detect_mode_used=detect_mode_used,
-        det_confidence=det_confidence,
-        decode_attempt_total=decode_attempt_total,
-        fallback_hits=fallback_hits,
-    )
-    locator_debug: Dict[str, Any] = {}
-    meta["control_plane_kinds"] = [] if control_plane_kinds is None else list(control_plane_kinds)
-    meta["control_session"] = None if control_session is None else dict(control_session)
-    meta["control_layout"] = None if control_layout is None else dict(control_layout)
-    meta["control_generation"] = None if control_generation is None else dict(control_generation)
-    meta["control_generations_seen"] = (
-        [] if control_generations_seen is None else [int(v) for v in control_generations_seen]
-    )
-    meta["decoded_plane"] = "unknown"
-    meta["decoded_control_family"] = ""
-    meta["decoded_control_kind"] = ""
-    if decoded_chunk_id is not None:
-        meta["decoded_chunk_id"] = int(decoded_chunk_id)
-        control_kind = control_kind_from_wire_chunk_id(decoded_chunk_id)
-        if control_kind is not None:
-            meta["decoded_plane"] = "control"
-            meta["decoded_control_family"] = control_family_for_kind(control_kind)
-            meta["decoded_control_kind"] = control_kind
-            try:
-                if decoded_payload is not None and control_kind == "session":
-                    meta["decoded_control_payload"] = decode_session_bootstrap(decoded_payload)
-                elif decoded_payload is not None and control_kind == "layout":
-                    meta["decoded_control_payload"] = decode_layout_bootstrap(decoded_payload)
-                elif decoded_payload is not None and control_kind == "generation":
-                    meta["decoded_control_payload"] = decode_generation_control(decoded_payload)
-            except Exception:
-                meta["decoded_control_payload"] = {"decode_error": "control_payload_parse_failed"}
-        elif int(decoded_chunk_id) > 0:
-            meta["decoded_plane"] = "data"
-    if v31_meta is not None:
-        locator_debug = _apply_v31_meta_to_debug(meta=meta, v31_meta=v31_meta)
-    if layered_failure_trace is not None:
-        meta["layered_control_trace"] = dict(layered_failure_trace)
-    elif protocol_path_used == "basic":
-        # When decode fails we still run locator once for debug so overlays are visible.
-        locator_debug = _probe_locator_debug(
-            meta=meta,
-            frame=frame,
-            track_roi_local=track_roi_local,
-            forced_roi_local=forced_roi_local,
-            grid_w=grid_w,
-            grid_h=grid_h,
-            locator_confidence_threshold=locator_confidence_threshold,
-        )
-    elif protocol_path_used == "compact":
-        locator_debug = _probe_compact_debug(
-            meta=meta,
-            frame=frame,
-            track_roi_local=track_roi_local,
-            forced_roi_local=forced_roi_local,
-        )
-
-    if not manual_strict:
-        # Legacy locator debug removed - only basic protocol supported
-        meta["locator_bbox_projection"] = None
-        meta["locator_confidence_projection"] = 0.0
-        meta["locator_bbox_cc"] = None
-        meta["locator_confidence_cc"] = 0.0
-    else:
-        meta["locator_bbox_projection"] = None
-        meta["locator_confidence_projection"] = 0.0
-        meta["locator_bbox_cc"] = None
-        meta["locator_confidence_cc"] = 0.0
-
-    # Probe the basic detector for debug: if forced ROI exists, probe within ROI only.
-    if forced_roi_local is not None and not manual_strict:
-        fx, fy, fw, fh = forced_roi_local
-        x1 = max(0, int(fx))
-        y1 = max(0, int(fy))
-        x2 = min(frame.shape[1], int(fx + fw))
-        y2 = min(frame.shape[0], int(fy + fh))
-        if x1 < x2 and y1 < y2:
-            probe_view = raw[y1:y2, x1:x2]
-            probe = detect_symbol_bbox(probe_view)
-            if probe is not None:
-                px, py, pw, ph = probe.bbox
-                mapped = (x1 + px, y1 + py, pw, ph)
-                _draw_rect(canvas, mapped, (0, 0, 255), thickness=2)
-                meta["v31_probe_bbox"] = [int(v) for v in mapped]
-                meta["v31_probe_confidence"] = float(probe.confidence)
-                meta["v31_probe_scope"] = "forced_roi"
-            else:
-                meta["v31_probe_bbox"] = None
-                meta["v31_probe_confidence"] = 0.0
-                meta["v31_probe_scope"] = "forced_roi"
-        else:
-            meta["v31_probe_bbox"] = None
-            meta["v31_probe_confidence"] = 0.0
-            meta["v31_probe_scope"] = "forced_roi_invalid"
-    elif not manual_strict:
-        probe = detect_symbol_bbox(raw)
-        if probe is not None:
-            _draw_rect(canvas, probe.bbox, (0, 0, 255), thickness=2)
-            meta["v31_probe_bbox"] = [int(v) for v in probe.bbox]
-            meta["v31_probe_confidence"] = float(probe.confidence)
-        else:
-            meta["v31_probe_bbox"] = None
-            meta["v31_probe_confidence"] = 0.0
-        meta["v31_probe_scope"] = "full_frame"
-    else:
-        meta["v31_probe_bbox"] = None
-        meta["v31_probe_confidence"] = 0.0
-        meta["v31_probe_scope"] = "manual_strict_disabled"
-
-    if forced_roi_local is not None and not manual_strict:
-        _draw_rect(canvas, forced_roi_local, (0, 255, 255), thickness=3)
-        # Legacy locator debug removed
-        meta["locator_bbox_in_forced_roi"] = None
-        meta["locator_confidence_in_forced_roi"] = 0.0
-    elif forced_roi_local is not None:
-        _draw_rect(canvas, forced_roi_local, (0, 255, 255), thickness=3)
-        meta["locator_bbox_in_forced_roi"] = None
-        meta["locator_confidence_in_forced_roi"] = 0.0
-
-    if track_roi_local is not None:
-        _draw_rect(canvas, track_roi_local, (255, 255, 0), thickness=2)
-        meta["track_roi_local"] = [int(v) for v in track_roi_local]
-        track_abs = _roi_local_to_abs(track_roi_local, capture_region)
-        if track_abs is not None:
-            meta["track_roi_abs"] = [int(v) for v in track_abs]
-        if manual_strict:
-            meta["decode_roi_local"] = [int(v) for v in track_roi_local]
-            if track_abs is not None:
-                meta["decode_roi_abs"] = [int(v) for v in track_abs]
-    elif manual_strict and forced_roi_local is not None:
-        meta["decode_roi_local"] = [int(v) for v in forced_roi_local]
-        forced_abs = _roi_local_to_abs(forced_roi_local, capture_region)
-        if forced_abs is not None:
-            meta["decode_roi_abs"] = [int(v) for v in forced_abs]
-
-    if det_bbox_local is not None:
-        _draw_rect(canvas, det_bbox_local, (0, 0, 255), thickness=3)
-        meta["det_bbox_local"] = [int(v) for v in det_bbox_local]
-        det_abs = _roi_local_to_abs(det_bbox_local, capture_region)
-        if det_abs is not None:
-            meta["det_bbox_abs"] = [int(v) for v in det_abs]
-
-    stem = os.path.join(debug_dir, "frame_{0:05d}".format(frame_index))
-    _save_debug_image(stem + ".raw.png", raw)
-    _save_debug_image(stem + ".annotated.png", canvas)
-    _save_debug_image(stem + ".png", canvas)
-    with open(stem + ".json", "w", encoding="utf-8") as f:
-        json.dump(meta, f, ensure_ascii=False, indent=2)
-    _record_debug_indexes(debug_dir=debug_dir, frame_index=frame_index, meta=meta)
-
-    # Protocol-standard debug artifact set.
-    frame_dir = os.path.join(debug_dir, "frame_{0:05d}".format(frame_index))
-    os.makedirs(frame_dir, exist_ok=True)
-    _save_debug_image(os.path.join(frame_dir, "frame_raw.png"), raw)
-
-    finder_canvas = raw.copy()
-    if isinstance(locator_debug, dict):
-        for cand in locator_debug.get("finder_candidates", []):
-            if (
-                isinstance(cand, dict)
-                and isinstance(cand.get("bbox"), list)
-                and len(cand["bbox"]) == 4
-            ):
-                bbox_tuple = tuple(int(v) for v in cand["bbox"])
-                if len(bbox_tuple) == 4:
-                    _draw_rect(finder_canvas, bbox_tuple, (0, 0, 255), thickness=2)  # type: ignore[arg-type]
-    _save_debug_image(os.path.join(frame_dir, "finder_candidates.png"), finder_canvas)
-
-    quad_canvas = raw.copy()
-    if isinstance(locator_debug, dict):
-        quad_src = locator_debug.get("quad_src")
-        if isinstance(quad_src, list) and len(quad_src) == 4:
-            try:
-                q = tuple((float(p[0]), float(p[1])) for p in quad_src)
-                if len(q) == 4:
-                    _draw_quad(quad_canvas, q, (0, 255, 0), thickness=2)  # type: ignore[arg-type]
-            except Exception:
-                pass
-    _save_debug_image(os.path.join(frame_dir, "quad_selected.png"), quad_canvas)
-
-    crop_rect = det_bbox_local
-    if crop_rect is None:
-        probe_bbox = meta.get("v31_probe_bbox")
-        if isinstance(probe_bbox, list) and len(probe_bbox) == 4:
-            crop_rect = tuple(int(v) for v in probe_bbox)
-    if crop_rect is None:
-        finder_candidates = locator_debug.get("finder_candidates") if isinstance(locator_debug, dict) else None
-        if isinstance(finder_candidates, list) and finder_candidates:
-            first = finder_candidates[0]
-            if isinstance(first, dict):
-                bbox = first.get("bbox")
-                if isinstance(bbox, list) and len(bbox) == 4:
-                    crop_rect = tuple(int(v) for v in bbox)
-    if crop_rect is not None:
-        x, y, w, h = crop_rect
-        x1 = max(0, x)
-        y1 = max(0, y)
-        x2 = min(raw.shape[1], x + w)
-        y2 = min(raw.shape[0], y + h)
-        if x1 < x2 and y1 < y2:
-            _save_debug_image(os.path.join(frame_dir, "bbox_crop.png"), raw[y1:y2, x1:x2].copy())
-
-    warp = getattr(v31_meta, "locator_warped_preview", None) if v31_meta is not None else None
-    if warp is not None and isinstance(warp, np.ndarray):
-        warp_img = warp.copy()
-        _save_debug_image(os.path.join(frame_dir, "warp.png"), warp_img)
-        grid_overlay = warp_img.copy()
-        sample_overlay = warp_img.copy()
-        if isinstance(locator_debug, dict):
-            grid_bbox = locator_debug.get("grid_bbox_std")
-            if isinstance(grid_bbox, list) and len(grid_bbox) == 4:
-                gx, gy, gw, gh = [int(v) for v in grid_bbox]
-                _draw_rect(grid_overlay, (gx, gy, gw, gh), (255, 0, 0), thickness=2)
-                try:
-                    gwh = getattr(v31_meta, "grid_size", "160x96")
-                    gx_count, gy_count = [int(p) for p in str(gwh).lower().split("x")]
-                    step_x = max(1, gx_count // 20)
-                    step_y = max(1, gy_count // 12)
-                    cell_w = float(gw) / float(max(1, gx_count))
-                    cell_h = float(gh) / float(max(1, gy_count))
-                    for j in range(0, gy_count, step_y):
-                        for i in range(0, gx_count, step_x):
-                            px = int(round(gx + (i + 0.5) * cell_w))
-                            py = int(round(gy + (j + 0.5) * cell_h))
-                            _draw_rect(
-                                sample_overlay, (px - 1, py - 1, 3, 3), (0, 255, 255), thickness=1
-                            )
-                except Exception:
-                    pass
-        _save_debug_image(os.path.join(frame_dir, "grid_overlay.png"), grid_overlay)
-        _save_debug_image(os.path.join(frame_dir, "sample_points.png"), sample_overlay)
-    else:
-        _save_debug_image(os.path.join(frame_dir, "warp.png"), raw)
-        _save_debug_image(os.path.join(frame_dir, "grid_overlay.png"), raw)
-        _save_debug_image(os.path.join(frame_dir, "sample_points.png"), raw)
-
-
-def _should_dump_debug_snapshot(
-    debug_dir: Optional[str],
-    debug_written: int,
-    debug_max_frames: int,
-    now: float,
-    debug_next_ts: float,
-    threshold: Optional[int],
-) -> bool:
-    return bool(
-        debug_dir
-        and debug_written < debug_max_frames
-        and now >= debug_next_ts
-        and threshold is not None
-    )
-
-
-def _maybe_dump_debug_snapshot(
-    now: float,
-    debug_dir: Optional[str],
-    debug_written: int,
-    debug_max_frames: int,
-    debug_next_ts: float,
-    debug_interval: float,
-    debug_time_sum: float,
-    debug_time_count: int,
-    threshold: Optional[int],
-    dump_kwargs: Dict[str, Any],
-) -> Tuple[int, float, float, int]:
-    if not _should_dump_debug_snapshot(
-        debug_dir=debug_dir,
-        debug_written=debug_written,
-        debug_max_frames=debug_max_frames,
-        now=now,
-        debug_next_ts=debug_next_ts,
-        threshold=threshold,
-    ):
-        return debug_written, debug_next_ts, debug_time_sum, debug_time_count
-
-    t_dbg0 = time.perf_counter()
-    _dump_debug_snapshot(
-        debug_dir=cast(str, debug_dir),
-        threshold=int(cast(int, threshold)),
-        **dump_kwargs,
-    )
-    debug_time_sum += max(0.0, time.perf_counter() - t_dbg0)
-    debug_time_count += 1
-    debug_written += 1
-    debug_next_ts = now + max(0.1, debug_interval)
-    return debug_written, debug_next_ts, debug_time_sum, debug_time_count
-
-
 def main(argv=None):
     args = build_parser().parse_args(argv)
     roi_policy = RoiPolicy.from_args(args)
@@ -1242,8 +524,16 @@ def main(argv=None):
     auto_fail_count = 0
     manual_attempts = 0
     frame_index = 0
-    debug_next_ts = start
-    debug_written = 0
+
+    # Initialize debug snapshot manager
+    debug_manager = None
+    if args.debug_dir:
+        debug_manager = DebugSnapshotManager(
+            debug_dir=args.debug_dir,
+            debug_max_frames=args.debug_max_frames,
+            debug_interval=args.debug_interval,
+        )
+
     last_decode_error = None  # type: Optional[str]
     last_gray4_failure_error = None  # type: Optional[str]
     last_gray4_failure_class = ""
@@ -1298,8 +588,6 @@ def main(argv=None):
     protocol_report_adapter = make_protocol_report_adapter(args.protocol)
     decode_time_sum = 0.0
     decode_time_count = 0
-    debug_time_sum = 0.0
-    debug_time_count = 0
     replay_mode = args.source == "replay"
     v3_track_roi = None
     v3_fail_streak = 0
@@ -1330,7 +618,12 @@ def main(argv=None):
             bbox_jitter_sum / float(max(1, bbox_jitter_count)) if bbox_jitter_count > 0 else 0.0
         )
         report["avg_decode_ms"] = (decode_time_sum / float(max(1, decode_time_count))) * 1000.0
-        report["avg_debug_dump_ms"] = (debug_time_sum / float(max(1, debug_time_count))) * 1000.0
+        if debug_manager:
+            report["avg_debug_dump_ms"] = (
+                debug_manager.debug_time_sum / float(max(1, debug_manager.debug_time_count))
+            ) * 1000.0
+        else:
+            report["avg_debug_dump_ms"] = 0.0
         report["new_fail_reason"] = locator_new_fail_reason
         report["new_elapsed_ms"] = float(locator_new_elapsed_ms)
         report["legacy_used"] = 1.0 if locator_legacy_used else 0.0
@@ -2434,16 +1727,9 @@ def main(argv=None):
                     if now >= next_stats_ts:
                         _print_stats(stats.snapshot(ts=now), assembler.missing_count())
                         next_stats_ts = now + max(0.1, args.stats_interval)
-                    debug_written, debug_next_ts, debug_time_sum, debug_time_count = (
-                        _maybe_dump_debug_snapshot(
+                    if debug_manager:
+                        debug_manager.maybe_dump(
                             now=now,
-                            debug_dir=args.debug_dir,
-                            debug_written=debug_written,
-                            debug_max_frames=args.debug_max_frames,
-                            debug_next_ts=debug_next_ts,
-                            debug_interval=args.debug_interval,
-                            debug_time_sum=debug_time_sum,
-                            debug_time_count=debug_time_count,
                             threshold=threshold,
                             dump_kwargs={
                                 "frame_index": frame_index,
@@ -2452,36 +1738,24 @@ def main(argv=None):
                                 "forced_roi_abs": forced_roi,
                                 "capture_region": capture_region,
                                 "decode_error": last_decode_error,
-                                "selected_block_size": selected_block_size,
                                 "protocol_path_used": protocol_path_used,
-                                "detect_mode_used": v3_mode,
                                 "track_roi_local": v3_track_roi,
                                 "det_bbox_local": last_det_bbox,
-                                "det_confidence": last_det_confidence,
-                                "decode_attempt_total": decode_attempt_total,
-                                "fallback_hits": fallback_hits,
                                 "manual_strict": roi_policy.manual_active(stats),
                                 "v31_meta": frame_v31_meta,
                                 "grid_w": grid_w,
                                 "grid_h": grid_h,
                                 "locator_confidence_threshold": args.locator_confidence_threshold,
                                 "layered_failure_trace": layered_failure_trace,
+                                "protocol": args.protocol,
                                 **_debug_control_plane_state(),
                             },
                         )
-                    )
                     continue
 
-            debug_written, debug_next_ts, debug_time_sum, debug_time_count = (
-                _maybe_dump_debug_snapshot(
+            if debug_manager:
+                debug_manager.maybe_dump(
                     now=now,
-                    debug_dir=args.debug_dir,
-                    debug_written=debug_written,
-                    debug_max_frames=args.debug_max_frames,
-                    debug_next_ts=debug_next_ts,
-                    debug_interval=args.debug_interval,
-                    debug_time_sum=debug_time_sum,
-                    debug_time_count=debug_time_count,
                     threshold=threshold,
                     dump_kwargs={
                         "frame_index": frame_index,
@@ -2490,26 +1764,21 @@ def main(argv=None):
                         "forced_roi_abs": forced_roi,
                         "capture_region": capture_region,
                         "decode_error": last_decode_error,
-                        "selected_block_size": selected_block_size,
                         "protocol_path_used": protocol_path_used,
-                        "detect_mode_used": v3_mode,
                         "track_roi_local": v3_track_roi,
                         "det_bbox_local": last_det_bbox,
-                        "det_confidence": last_det_confidence,
-                        "decode_attempt_total": decode_attempt_total,
-                        "fallback_hits": fallback_hits,
                         "manual_strict": roi_policy.manual_active(stats),
                         "v31_meta": frame_v31_meta,
                         "grid_w": grid_w,
                         "grid_h": grid_h,
                         "locator_confidence_threshold": args.locator_confidence_threshold,
                         "layered_failure_trace": None,
+                        "protocol": args.protocol,
                         **_debug_control_plane_state(),
                         "decoded_chunk_id": int(header.chunk_id),
                         "decoded_payload": payload,
                     },
                 )
-            )
 
             is_data_frame = int(header.frame_type) == int(FRAME_DATA)
 
