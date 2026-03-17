@@ -48,6 +48,9 @@ from screen_airdrop.receiver.window_locator import resolve_window_region
 # Debug utilities
 from screen_airdrop.receiver.debug import DebugSnapshotManager
 
+# ROI utilities
+from screen_airdrop.receiver.roi import RoiManager, ensure_roi_valid
+
 
 def _parse_region(raw: Optional[str]) -> Optional[Tuple[int, int, int, int]]:
     if not raw:
@@ -313,100 +316,6 @@ def _print_stats(snapshot: dict, missing: Optional[int]) -> None:
     )
 
 
-def _ensure_roi_valid(roi: Tuple[int, int, int, int]) -> Tuple[int, int, int, int]:
-    x, y, w, h = roi
-    if w < 128 or h < 128:
-        raise ValueError("roi too small; minimum is 128x128")
-    return int(x), int(y), int(w), int(h)
-
-
-def _roi_abs_to_local(
-    roi_abs: Optional[Tuple[int, int, int, int]],
-    capture_region: Optional[Tuple[int, int, int, int]],
-    frame_shape: Tuple[int, int, int],
-) -> Optional[Tuple[int, int, int, int]]:
-    if roi_abs is None:
-        return None
-    rx, ry, rw, rh = roi_abs
-    if rw <= 0 or rh <= 0:
-        return None
-    if capture_region is None:
-        return roi_abs
-    cx, cy, _, _ = capture_region
-    fx, fy = int(rx - cx), int(ry - cy)
-    fw, fh = int(rw), int(rh)
-    h, w = frame_shape[:2]
-    x1 = max(0, fx)
-    y1 = max(0, fy)
-    x2 = min(w, fx + fw)
-    y2 = min(h, fy + fh)
-    if x2 <= x1 or y2 <= y1:
-        return None
-    return (x1, y1, x2 - x1, y2 - y1)
-
-
-def _expand_roi_local(
-    roi_local: Optional[Tuple[int, int, int, int]],
-    frame_shape: Tuple[int, int, int],
-    pad_px: int,
-) -> Optional[Tuple[int, int, int, int]]:
-    if roi_local is None:
-        return None
-    x, y, w, h = roi_local
-    if w <= 0 or h <= 0:
-        return None
-    p = max(0, int(pad_px))
-    fh, fw = frame_shape[:2]
-    x1 = max(0, int(x) - p)
-    y1 = max(0, int(y) - p)
-    x2 = min(fw, int(x + w) + p)
-    y2 = min(fh, int(y + h) + p)
-    if x2 <= x1 or y2 <= y1:
-        return None
-    return (x1, y1, x2 - x1, y2 - y1)
-
-
-def _build_track_roi_from_bbox(
-    det_bbox: Tuple[int, int, int, int],
-    frame_shape: Tuple[int, int, int],
-    base_margin_px: int,
-) -> Tuple[int, int, int, int]:
-    bx, by, bw, bh = det_bbox
-    fh, fw = frame_shape[:2]
-    # Keep a practical motion/jitter buffer for real capture streams.
-    adaptive = max(24, int(min(bw, bh) * 0.10))
-    margin = min(max(24, int(base_margin_px)), adaptive)
-    x = max(0, int(bx) - margin)
-    y = max(0, int(by) - margin)
-    x2 = min(fw, int(bx + bw) + margin)
-    y2 = min(fh, int(by + bh) + margin)
-    tw = max(16, x2 - x)
-    th = max(16, y2 - y)
-    # Hard-stop: tracking roi should not silently become near full screen.
-    if tw * th > int(fw * fh * 0.75):
-        margin2 = min(32, margin)
-        x = max(0, int(bx) - margin2)
-        y = max(0, int(by) - margin2)
-        x2 = min(fw, int(bx + bw) + margin2)
-        y2 = min(fh, int(by + bh) + margin2)
-        tw = max(16, x2 - x)
-        th = max(16, y2 - y)
-    return (x, y, tw, th)
-
-
-def _roi_local_to_abs(
-    roi_local: Optional[Tuple[int, int, int, int]],
-    capture_region: Optional[Tuple[int, int, int, int]],
-) -> Optional[Tuple[int, int, int, int]]:
-    if roi_local is None:
-        return None
-    if capture_region is None:
-        return roi_local
-    x, y, w, h = roi_local
-    cx, cy, _, _ = capture_region
-    return (int(cx + x), int(cy + y), int(w), int(h))
-
-
 def _build_pipeline_seed_roi_local(
     source: object,
     forced_roi_abs: Optional[Tuple[int, int, int, int]],
@@ -425,7 +334,8 @@ def _build_pipeline_seed_roi_local(
             monitor_region=monitor_region,
         )
         frame_shape = (int(capture_region[3]), int(capture_region[2]), 3)
-        return _roi_abs_to_local(forced_roi_abs, capture_region, frame_shape)
+        roi_mgr = RoiManager(capture_region)
+        return roi_mgr.abs_to_local(forced_roi_abs, frame_shape)
     except Exception:
         return None
 
@@ -477,7 +387,7 @@ def main(argv=None):
 
     forced_roi = cli_roi or profile_roi
     if forced_roi is not None:
-        forced_roi = _ensure_roi_valid(forced_roi)
+        forced_roi = ensure_roi_valid(forced_roi)
 
     if roi_policy.requires_manual_roi(forced_roi=forced_roi):
         raise ValueError("manual roi-mode requires --roi/--roi-profile or --roi-interactive")
@@ -494,7 +404,7 @@ def main(argv=None):
         selected = select_region(get_monitor_region(args.monitor_index))
         if selected is None:
             raise RuntimeError("manual roi selection canceled")
-        forced_roi = _ensure_roi_valid(selected)
+        forced_roi = ensure_roi_valid(selected)
         stats.mark_manual_roi(switched=False)
         if args.roi_profile:
             save_profile(args.roi_profile, forced_roi, args.monitor_index)
@@ -1425,10 +1335,11 @@ def main(argv=None):
             frame_index += 1
             frame_v31_meta = None
             capture_region = getattr(source, "active_region", None)
-            forced_roi_local = _roi_abs_to_local(forced_roi, capture_region, frame.shape)
+            roi_mgr = RoiManager(capture_region)
+            forced_roi_local = roi_mgr.abs_to_local(forced_roi, frame.shape)
             manual_mode_now = roi_policy.manual_active(stats)
             manual_decode_roi_local = (
-                _expand_roi_local(forced_roi_local, frame.shape, roi_policy.pad_px)
+                roi_mgr.expand(forced_roi_local, frame.shape, roi_policy.pad_px)
                 if manual_mode_now
                 else forced_roi_local
             )
@@ -1475,9 +1386,9 @@ def main(argv=None):
                 selected = select_region(get_monitor_region(args.monitor_index))
                 if selected is None:
                     raise RuntimeError("manual roi selection canceled")
-                forced_roi = _ensure_roi_valid(selected)
-                forced_roi_local = _roi_abs_to_local(forced_roi, capture_region, frame.shape)
-                manual_decode_roi_local = _expand_roi_local(
+                forced_roi = ensure_roi_valid(selected)
+                forced_roi_local = roi_mgr.abs_to_local(forced_roi, frame.shape)
+                manual_decode_roi_local = roi_mgr.expand(
                     forced_roi_local, frame.shape, roi_policy.pad_px
                 )
                 v3_track_roi = manual_decode_roi_local
@@ -1622,7 +1533,7 @@ def main(argv=None):
                         if manual_strict and manual_decode_roi_local is not None:
                             v3_track_roi = manual_decode_roi_local
                         else:
-                            v3_track_roi = _build_track_roi_from_bbox(
+                            v3_track_roi = roi_mgr.build_track_roi(
                                 (bx, by, bw, bh),
                                 frame.shape,
                                 args.track_margin_px,
@@ -1712,12 +1623,12 @@ def main(argv=None):
                         )
                         selected = select_region(get_monitor_region(args.monitor_index))
                         if selected is not None:
-                            forced_roi = _ensure_roi_valid(selected)
+                            forced_roi = ensure_roi_valid(selected)
                             stats.mark_manual_roi(switched=True)
-                            forced_roi_local = _roi_abs_to_local(
-                                forced_roi, capture_region, frame.shape
+                            forced_roi_local = roi_mgr.abs_to_local(
+                                forced_roi, frame.shape
                             )
-                            manual_decode_roi_local = _expand_roi_local(
+                            manual_decode_roi_local = roi_mgr.expand(
                                 forced_roi_local, frame.shape, roi_policy.pad_px
                             )
                             v3_track_roi = manual_decode_roi_local
