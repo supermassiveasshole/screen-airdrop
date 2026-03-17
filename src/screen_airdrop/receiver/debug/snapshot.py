@@ -150,17 +150,16 @@ class DebugSnapshotManager:
             layered_failure_trace: Layered failure trace
             protocol: Protocol name
         """
-        # Import here to avoid circular dependency
-        from screen_airdrop.receiver.debug.probes import (
-            probe_compact_debug,
-            probe_locator_debug,
-        )
-        from screen_airdrop.sender.controller import (
+        from screen_airdrop.common.control_plane import (
             control_family_for_kind,
             control_kind_from_wire_chunk_id,
             decode_generation_control,
             decode_layout_bootstrap,
             decode_session_bootstrap,
+        )
+        from screen_airdrop.receiver.debug.probes import (
+            probe_compact_debug,
+            probe_locator_debug,
         )
 
         os.makedirs(self.debug_dir, exist_ok=True)
