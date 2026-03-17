@@ -10,7 +10,7 @@ wheels/
 .venv
 
 # Local runtime artifacts
-debug/
+/debug/
 recovered/
 
 # macOS finder metadata
