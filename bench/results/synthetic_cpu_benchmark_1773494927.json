@@ -1,0 +1,83 @@
+[
+  {
+    "benchmark_kind": "synthetic_cpu",
+    "protocol": "basic",
+    "config": {
+      "protocol": "basic",
+      "grid_w": 160,
+      "grid_h": 96
+    },
+    "layout_mode": "same_grid",
+    "ecc_level": "Q",
+    "payload_mode": "fixed",
+    "payload_bytes": 500,
+    "payload_bits_per_module": 0.1670843776106934,
+    "capacity_bytes": 596,
+    "frame_size_modules": [
+      190,
+      126
+    ],
+    "finder_size": 9,
+    "guard_band": 2,
+    "iterations": 100,
+    "encode_ms": 3.9875595600460656,
+    "decode_ms": 35.295639160467545,
+    "total_ms": 39.28319872051361,
+    "success_rate": 1.0,
+    "synthetic_cpu_kib_per_s": 12.429773183033094
+  },
+  {
+    "benchmark_kind": "synthetic_cpu",
+    "protocol": "compact",
+    "config": {
+      "protocol": "compact",
+      "grid_w": 160,
+      "grid_h": 96
+    },
+    "layout_mode": "same_grid",
+    "ecc_level": "Q",
+    "payload_mode": "fixed",
+    "payload_bytes": 500,
+    "payload_bits_per_module": 0.18115942028985507,
+    "capacity_bytes": 596,
+    "frame_size_modules": [
+      184,
+      120
+    ],
+    "finder_size": 7,
+    "guard_band": 1,
+    "iterations": 100,
+    "encode_ms": 3.8723925102385692,
+    "decode_ms": 25.358095820847666,
+    "total_ms": 29.230488331086235,
+    "success_rate": 1.0,
+    "synthetic_cpu_kib_per_s": 16.70451907848284
+  },
+  {
+    "benchmark_kind": "synthetic_cpu",
+    "protocol": "gray4",
+    "config": {
+      "protocol": "gray4",
+      "grid_w": 224,
+      "grid_h": 136
+    },
+    "layout_mode": "same_grid",
+    "ecc_level": "Q",
+    "payload_mode": "fixed",
+    "payload_bytes": 500,
+    "payload_bits_per_module": 0.0948676596148373,
+    "capacity_bytes": 2494,
+    "frame_size_modules": [
+      254,
+      166
+    ],
+    "finder_size": 9,
+    "guard_band": 2,
+    "iterations": 100,
+    "encode_ms": 5.6130600106553175,
+    "decode_ms": 69.28958503995091,
+    "total_ms": 74.90264505060622,
+    "success_rate": 1.0,
+    "synthetic_cpu_kib_per_s": 6.518878601284429
+  }
+]

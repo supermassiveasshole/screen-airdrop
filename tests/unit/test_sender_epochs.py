@@ -188,3 +188,31 @@ def test_chunk_fill_ratio_drives_effective_chunk_size_when_unspecified(tmp_path)
 
     assert int(first["metadata"]["chunk_size"]) == int(first["metadata"]["effective_chunk_size"])
     assert int(first["metadata"]["effective_chunk_size"]) == int(first["metadata"]["frame_payload_cap"])
+
+
+def test_layered_metadata_exposes_profiles(tmp_path):
+    sample = tmp_path / "sample.txt"
+    sample.write_text("hello layered metadata", encoding="utf-8")
+
+    first = next(
+        build_encoded_frames(
+            input_path=str(sample),
+            protocol="layered",
+            compress="none",
+            sync_frames=0,
+            chunk_fill_ratio=1.0,
+            module_grid="224x136",
+            epochs=1,
+        )
+    )
+
+    metadata = dict(first["metadata"])
+    assert int(metadata["bootstrap_profile_id"]) == 2
+    assert int(metadata["bootstrap_ecc_profile_id"]) == 2
+    assert int(metadata["body_profile_id"]) == 1
+    assert int(metadata["body_ecc_profile_id"]) == 1
+
+    control_layout = next(
+        item for item in metadata["control_plane"] if item["kind"] == "layout"
+    )
+    assert int(control_layout["payload_size"]) > 0

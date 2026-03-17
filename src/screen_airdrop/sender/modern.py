@@ -50,13 +50,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-epochs", type=int, default=0, help="max transmission epochs (0=unlimited)"
     )
     parser.add_argument("--dump-frames", default=None, help="directory to dump frame images")
+    parser.add_argument(
+        "--dump-only",
+        action="store_true",
+        help="dump encoded frames without opening the sender window",
+    )
     parser.add_argument("--report-json", default=None, help="path to write JSON report")
     parser.add_argument(
         "--overlay", action="store_true", help="show debug text overlay on sender window"
     )
     parser.add_argument(
         "--protocol",
-        choices=["basic", "compact", "gray4"],
+        choices=["basic", "compact", "gray4", "layered"],
         default="basic",
         help="protocol name",
     )
@@ -78,11 +83,17 @@ def main(argv=None):
         guard_band_modules = 1
         corner_size_modules = 7
         default_ecc = "L"
+    elif args.protocol == "layered":
+        guard_band_modules = 1
+        corner_size_modules = 7
+        default_ecc = "L"
     else:  # basic
         guard_band_modules = 2
         corner_size_modules = 9
         default_ecc = "Q"
-    default_manifest_repeat = 8 if args.protocol == "gray4" else 5
+    default_manifest_repeat = (
+        8 if args.protocol == "gray4" else (4 if args.protocol == "layered" else 5)
+    )
 
     # Use user-specified ECC level or protocol default
     ecc_level = args.ecc_level if args.ecc_level is not None else default_ecc
@@ -91,7 +102,7 @@ def main(argv=None):
     )
     data_realizations = int(args.data_realizations) if args.data_realizations is not None else 1
     schedule = BroadcastSchedule(
-        sync_frames=8,
+        sync_frames=4 if args.protocol == "layered" else 8,
         control_burst_repeat=manifest_repeat,
         data_realizations=data_realizations,
     )
@@ -108,6 +119,7 @@ def main(argv=None):
         max_epochs=args.max_epochs,
         window_name=args.window_name,
         dump_frames=args.dump_frames,
+        dump_only=args.dump_only,
         report_json=args.report_json,
         overlay=args.overlay,
         protocol=args.protocol,

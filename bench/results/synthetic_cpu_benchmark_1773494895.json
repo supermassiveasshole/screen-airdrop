@@ -1,0 +1,29 @@
+[
+  {
+    "benchmark_kind": "synthetic_cpu",
+    "protocol": "gray4",
+    "config": {
+      "protocol": "gray4",
+      "grid_w": 224,
+      "grid_h": 136
+    },
+    "layout_mode": "same_grid",
+    "ecc_level": "L",
+    "payload_mode": "fixed",
+    "payload_bytes": 500,
+    "payload_bits_per_module": 0.0948676596148373,
+    "capacity_bytes": 7572,
+    "frame_size_modules": [
+      254,
+      166
+    ],
+    "finder_size": 9,
+    "guard_band": 2,
+    "iterations": 100,
+    "encode_ms": 6.033678819367196,
+    "decode_ms": 70.56835921030142,
+    "total_ms": 76.60203802966862,
+    "success_rate": 1.0,
+    "synthetic_cpu_kib_per_s": 6.374259256795289
+  }
+]

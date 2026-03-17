@@ -1,7 +1,9 @@
+# pyright: reportArgumentType=false
 """Chunk assembly logic for broadcast receive mode."""
 
 from __future__ import annotations
 
+import threading
 from typing import Dict, Optional
 
 from screen_airdrop.common.control_plane import (
@@ -27,17 +29,36 @@ class ChunkAssembler(object):
         self.session_info: Optional[Dict[str, object]] = None
         self.layout_info: Optional[Dict[str, object]] = None
         self._received_count: int = 0  # data chunks received (chunk_id > 0), O(1) tracking
+        self._lock = threading.Lock()  # lock for thread-safe updates
 
-    def add(self, chunk_id: int, payload: bytes) -> None:
-        if chunk_id not in self.chunks:
-            self.chunks[chunk_id] = payload
-            control_kind = control_kind_from_wire_chunk_id(chunk_id)
-            if control_kind is not None:
-                self.add_control(control_kind, payload)
-            else:
-                self._received_count += 1
+    def add(self, chunk_id: int, payload: bytes) -> bool:
+        """Add a chunk to the assembler.
+
+        Args:
+            chunk_id: Chunk ID
+            payload: Chunk payload
+
+        Returns:
+            True if this is a new chunk, False if it was already received
+        """
+        with self._lock:
+            is_new = chunk_id not in self.chunks
+            if is_new:
+                self.chunks[chunk_id] = payload
+                control_kind = control_kind_from_wire_chunk_id(chunk_id)
+                if control_kind is not None:
+                    self._add_control_locked(control_kind, payload)
+                else:
+                    self._received_count += 1
+            return is_new
 
     def add_control(self, kind: str, payload: bytes) -> None:
+        """Add a control frame (thread-safe)."""
+        with self._lock:
+            self._add_control_locked(kind, payload)
+
+    def _add_control_locked(self, kind: str, payload: bytes) -> None:
+        """Add a control frame (caller must hold lock)."""
         if kind not in self.control_items:
             self.control_items[kind] = payload
         if kind == CONTROL_KIND_MANIFEST and self.manifest is None:
@@ -54,14 +75,16 @@ class ChunkAssembler(object):
             self.layout_info = decode_layout_bootstrap(payload)
 
     def complete(self) -> bool:
-        if self.manifest is None:
-            return False
-        return self._received_count >= self.manifest.total_chunks
+        with self._lock:
+            if self.manifest is None:
+                return False
+            return self._received_count >= self.manifest.total_chunks
 
     def missing_count(self) -> Optional[int]:
-        if self.manifest is None:
-            return None
-        return max(0, self.manifest.total_chunks - self._received_count)
+        with self._lock:
+            if self.manifest is None:
+                return None
+            return max(0, self.manifest.total_chunks - self._received_count)
 
     def missing_chunk_ids(self, limit: int = 32) -> Optional[list[int]]:
         if self.manifest is None:

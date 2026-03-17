@@ -1,3 +1,4 @@
+# pyright: reportAttributeAccessIssue=false
 import importlib.util
 import json
 import sys

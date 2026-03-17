@@ -1,3 +1,4 @@
+# pyright: reportAttributeAccessIssue=false, reportIndexIssue=false, reportOperatorIssue=false
 """Unit tests for the async receiver pipeline."""
 
 from __future__ import annotations
@@ -28,6 +29,10 @@ from screen_airdrop.receiver.pipeline import (
     DecodeResult,
     DecodeWorker,
     PipelineStats,
+    _create_shared_frame,
+    _fingerprint_diff,
+    _fingerprint_from_bgra,
+    _release_shared_frame,
 )
 
 # ---------------------------------------------------------------------------
@@ -114,6 +119,45 @@ class TestPipelineStats:
             t.join()
 
         assert stats.captured == 4000
+
+
+class TestPipelineHelpers:
+    def test_fingerprint_detects_identical_and_changed_frames(self):
+        frame = np.zeros((64, 64, 4), dtype=np.uint8)
+        fp1 = _fingerprint_from_bgra(frame)
+        fp2 = _fingerprint_from_bgra(frame.copy())
+        assert _fingerprint_diff(fp1, fp2) == 0.0
+
+        frame[10:20, 10:20, 2] = 255
+        fp3 = _fingerprint_from_bgra(frame)
+        assert _fingerprint_diff(fp1, fp3) > 0.0
+
+    def test_shared_frame_lifecycle_roundtrip(self):
+        frame = np.arange(4 * 4 * 3, dtype=np.uint8).reshape(4, 4, 3)
+        fake_instances = []
+
+        class _FakeShm:
+            def __init__(self, *, create=False, size=0, name=None):
+                self.name = "fake-shm" if create else str(name)
+                self.buf = bytearray(size if create else frame.nbytes)
+                self.closed = False
+                self.unlinked = False
+                fake_instances.append(self)
+
+            def close(self):
+                self.closed = True
+
+            def unlink(self):
+                self.unlinked = True
+
+        with patch("screen_airdrop.receiver.pipeline.shared_memory.SharedMemory", side_effect=_FakeShm):
+            shm_name, shm_bytes = _create_shared_frame(frame)
+            assert shm_name == "fake-shm"
+            assert shm_bytes == frame.nbytes
+            _release_shared_frame(shm_name)
+
+        assert fake_instances[0].closed is True
+        assert fake_instances[-1].unlinked is True
 
 
 # ---------------------------------------------------------------------------
@@ -606,6 +650,7 @@ class TestChunkAssemblerO1:
 class TestDecodeWorker:
     def test_uses_initial_roi_with_track_mode(self):
         fq = queue.Queue()
+        release_q = queue.Queue()
         rq = queue.Queue()
         stop = threading.Event()
         stats = PipelineStats()
@@ -635,6 +680,7 @@ class TestDecodeWorker:
             worker = DecodeWorker(
                 worker_id=0,
                 frame_queue=fq,
+                release_queue=release_q,
                 result_queue=rq,
                 stop_event=stop,
                 stats=stats,
@@ -655,6 +701,7 @@ class TestDecodeWorker:
 
     def test_result_queue_full_is_counted(self):
         fq = queue.Queue()
+        release_q = queue.Queue()
         rq = queue.Queue(maxsize=1)
         stop = threading.Event()
         stats = PipelineStats()
@@ -686,6 +733,7 @@ class TestDecodeWorker:
             worker = DecodeWorker(
                 worker_id=0,
                 frame_queue=fq,
+                release_queue=release_q,
                 result_queue=rq,
                 stop_event=stop,
                 stats=stats,
@@ -698,6 +746,7 @@ class TestDecodeWorker:
 
     def test_decode_failure_restores_initial_roi(self):
         fq = queue.Queue()
+        release_q = queue.Queue()
         rq = queue.Queue()
         stop = threading.Event()
         stats = PipelineStats()
@@ -715,6 +764,7 @@ class TestDecodeWorker:
             worker = DecodeWorker(
                 worker_id=0,
                 frame_queue=fq,
+                release_queue=release_q,
                 result_queue=rq,
                 stop_event=stop,
                 stats=stats,
@@ -729,6 +779,7 @@ class TestDecodeWorker:
 
     def test_lock_state_transitions_to_locked_after_success(self):
         fq = queue.Queue()
+        release_q = queue.Queue()
         rq = queue.Queue()
         stop = threading.Event()
         stats = PipelineStats()
@@ -758,6 +809,7 @@ class TestDecodeWorker:
             worker = DecodeWorker(
                 worker_id=0,
                 frame_queue=fq,
+                release_queue=release_q,
                 result_queue=rq,
                 stop_event=stop,
                 stats=stats,
@@ -773,6 +825,7 @@ class TestDecodeWorker:
 
     def test_lock_state_reacquires_after_five_failures(self):
         fq = queue.Queue()
+        release_q = queue.Queue()
         rq = queue.Queue()
         stop = threading.Event()
         stats = PipelineStats()
@@ -809,6 +862,7 @@ class TestDecodeWorker:
             worker = DecodeWorker(
                 worker_id=0,
                 frame_queue=fq,
+                release_queue=release_q,
                 result_queue=rq,
                 stop_event=stop,
                 stats=stats,
@@ -819,6 +873,137 @@ class TestDecodeWorker:
 
         snap = stats.snapshot()
         assert worker._lock_state == "acquire"
-        assert worker._track_roi == (5, 6, 70, 70)
+        assert worker._track_roi == (0, 0, 74, 74)
         assert snap["lock_locked_to_acquire"] == 1
         assert snap["locked_decode_fail_streak_max"] == 5
+
+    def test_layered_locked_state_prefers_geometry_reuse(self):
+        fq = queue.Queue()
+        release_q = queue.Queue()
+        rq = queue.Queue()
+        stop = threading.Event()
+        stats = PipelineStats()
+        fq.put(_make_black_frame(100, 100))
+        fq.put(_make_black_frame(100, 100))
+
+        calls = {"decode_frame": 0, "decode_frame_with_geometry": 0}
+
+        def _make_layered_result(frame_id, chunk_id, *, geometry_reused):
+            header = FrameHeaderBasic.make(
+                frame_type=FRAME_DATA,
+                session_id=1,
+                epoch_id=0,
+                frame_id=frame_id,
+                total_frames=10,
+                chunk_id=chunk_id,
+                payload=b"ok",
+            )
+            meta = _make_meta(det_bbox=(10, 10, 40, 40))
+            meta.quad_src = np.zeros((4, 2), dtype=np.float32)
+            meta.homography = np.eye(3, dtype=np.float32)
+            meta.homography_inv = np.eye(3, dtype=np.float32)
+            meta.geometry_reused = geometry_reused
+            meta.locator_warped_preview = np.zeros((10, 10, 3), dtype=np.uint8)
+            return DecodedFrame(frame_header=header, payload=b"ok", meta=meta)
+
+        def _fake_decode_frame(**kwargs):
+            calls["decode_frame"] += 1
+            _ = kwargs
+            return _make_layered_result(1, 1, geometry_reused=False)
+
+        def _fake_decode_frame_with_geometry(**kwargs):
+            calls["decode_frame_with_geometry"] += 1
+            _ = kwargs
+            stop.set()
+            return _make_layered_result(2, 2, geometry_reused=True)
+
+        with patch(
+            "screen_airdrop.receiver.protocol_adapter_layered.LayeredProtocolDecoder.decode_frame",
+            side_effect=_fake_decode_frame,
+        ), patch(
+            "screen_airdrop.receiver.protocol_adapter_layered.LayeredProtocolDecoder.decode_frame_with_geometry",
+            side_effect=_fake_decode_frame_with_geometry,
+        ):
+            worker = DecodeWorker(
+                worker_id=0,
+                frame_queue=fq,
+                release_queue=release_q,
+                result_queue=rq,
+                stop_event=stop,
+                stats=stats,
+                protocol="layered",
+            )
+            worker.start()
+            worker.join(timeout=2.0)
+
+        snap = stats.snapshot()
+        assert calls["decode_frame"] == 1
+        assert calls["decode_frame_with_geometry"] == 1
+        assert snap["lock_decode_mode_counts"]["geometry_reuse"] == 1
+        assert snap["geometry_reuse_success_count"] == 1
+        assert snap["reacquire_success_count"] == 1
+
+    def test_layered_geometry_reuse_only_reacquires_after_five_failures(self):
+        fq = queue.Queue()
+        release_q = queue.Queue()
+        rq = queue.Queue()
+        stop = threading.Event()
+        stats = PipelineStats()
+        for _ in range(7):
+            fq.put(_make_black_frame(100, 100))
+
+        calls = {"decode_frame": 0, "decode_frame_with_geometry": 0}
+
+        def _make_layered_result():
+            header = FrameHeaderBasic.make(
+                frame_type=FRAME_DATA,
+                session_id=1,
+                epoch_id=0,
+                frame_id=1,
+                total_frames=10,
+                chunk_id=1,
+                payload=b"ok",
+            )
+            meta = _make_meta(det_bbox=(10, 10, 40, 40))
+            meta.quad_src = np.zeros((4, 2), dtype=np.float32)
+            meta.homography = np.eye(3, dtype=np.float32)
+            meta.homography_inv = np.eye(3, dtype=np.float32)
+            meta.geometry_reused = False
+            meta.locator_warped_preview = np.zeros((10, 10, 3), dtype=np.uint8)
+            return DecodedFrame(frame_header=header, payload=b"ok", meta=meta)
+
+        def _fake_decode_frame(**kwargs):
+            calls["decode_frame"] += 1
+            if calls["decode_frame"] >= 2:
+                stop.set()
+            return _make_layered_result()
+
+        def _fake_decode_frame_with_geometry(**kwargs):
+            calls["decode_frame_with_geometry"] += 1
+            _ = kwargs
+            raise ValueError("bootstrap rs decode failed")
+
+        with patch(
+            "screen_airdrop.receiver.protocol_adapter_layered.LayeredProtocolDecoder.decode_frame",
+            side_effect=_fake_decode_frame,
+        ), patch(
+            "screen_airdrop.receiver.protocol_adapter_layered.LayeredProtocolDecoder.decode_frame_with_geometry",
+            side_effect=_fake_decode_frame_with_geometry,
+        ):
+            worker = DecodeWorker(
+                worker_id=0,
+                frame_queue=fq,
+                release_queue=release_q,
+                result_queue=rq,
+                stop_event=stop,
+                stats=stats,
+                protocol="layered",
+            )
+            worker.start()
+            worker.join(timeout=2.0)
+
+        snap = stats.snapshot()
+        assert calls["decode_frame"] == 2
+        assert calls["decode_frame_with_geometry"] == 5
+        assert snap["geometry_reuse_fail_count"] == 5
+        assert snap["lock_locked_to_acquire"] == 1

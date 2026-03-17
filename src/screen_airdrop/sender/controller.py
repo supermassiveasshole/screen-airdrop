@@ -32,9 +32,14 @@ from screen_airdrop.common.protocol_basic import (
     FRAME_SYNC,
     FrameHeaderBasic,
 )
+from screen_airdrop.sender.encoder_layered import (
+    layered_control_layout_metadata,
+    layered_profile_metadata,
+)
 from screen_airdrop.sender.protocol_adapter_basic import BasicProtocolEncoder
 from screen_airdrop.sender.protocol_adapter_compact import CompactProtocolEncoder
 from screen_airdrop.sender.protocol_adapter_gray4 import Gray4ProtocolEncoder
+from screen_airdrop.sender.protocol_adapter_layered import LayeredProtocolEncoder
 from screen_airdrop.sender.renderer_cv2 import CV2Renderer
 from screen_airdrop.sender.schedule_policy import BroadcastSchedule
 
@@ -131,6 +136,14 @@ def _build_layout_control_payload(
             "frame_payload_cap": int(frame_payload_cap),
             "effective_chunk_size": int(effective_chunk_size),
             "module_grid": module_grid,
+            **(
+                {
+                    **layered_profile_metadata(),
+                    **layered_control_layout_metadata(),
+                }
+                if protocol == "layered"
+                else {}
+            ),
         }
     )
 
@@ -272,8 +285,27 @@ def build_encoded_frames(
         )
         layout_info = encoder.get_layout()
         cap = layout_info.data_capacity_bits // 8
+    elif protocol == "layered":
+        try:
+            gw, gh = [int(p) for p in module_grid.lower().split("x")]
+        except Exception as exc:
+            raise RuntimeError("invalid module-grid {0}: {1}".format(module_grid, exc))
+        version = 1
+        encoder = LayeredProtocolEncoder(
+            grid_w=gw,
+            grid_h=gh,
+            ecc_level=ecc_level,
+            guard_band=guard_band_modules,
+            corner_size=corner_size_modules,
+            outer_padding_px=outer_padding_px,
+            outer_padding_white=outer_padding_white,
+        )
+        layout_info = encoder.get_layout()
+        cap = layout_info.data_capacity_bits // 8
     else:
-        raise ValueError(f"Protocol '{protocol}' not supported, use 'basic', 'compact', or 'gray4'")
+        raise ValueError(
+            f"Protocol '{protocol}' not supported, use 'basic', 'compact', 'gray4', or 'layered'"
+        )
     normalized_fill_ratio = max(0.05, min(1.0, float(chunk_fill_ratio)))
     robust_cap = min(int(cap), max(64, int(cap * normalized_fill_ratio)))
     effective_chunk_size = int(robust_cap)
@@ -340,6 +372,7 @@ def build_encoded_frames(
     total_data_frames = ((len(control_items) + 1) * control_burst_repeat) + payload_frame_count
 
     # Yield metadata first so caller can access session_id, manifest, etc.
+    layered_profiles = layered_profile_metadata() if protocol == "layered" else {}
     metadata = {
         "session_id": session_id,
         "manifest": built["manifest"],
@@ -374,6 +407,7 @@ def build_encoded_frames(
         "protocol_version": version,
         "quiet_zone_px": quiet_zone_px,
         "schedule": asdict(schedule),
+        **layered_profiles,
     }
 
     for i in range(sync_frames):
@@ -564,6 +598,7 @@ def run_sender(
     width: int = DEFAULT_WIDTH,
     height: int = DEFAULT_HEIGHT,
     schedule: Optional[BroadcastSchedule] = None,
+    dump_only: bool = False,
 ) -> int:
     if outer_padding_color.lower() not in ("black", "white"):
         raise RuntimeError("invalid outer-padding-color: {0}".format(outer_padding_color))
@@ -617,6 +652,16 @@ def run_sender(
     data_realizations = int(schedule_meta.get("data_realizations", schedule.data_realizations))
     payload_chunk_count = int(metadata.get("payload_chunk_count", len(payload_chunks)))
     payload_frame_count = int(metadata.get("payload_frame_count", len(payload_chunks)))
+    layered_profiles = {
+        key: metadata[key]
+        for key in (
+            "bootstrap_profile_id",
+            "bootstrap_ecc_profile_id",
+            "body_profile_id",
+            "body_ecc_profile_id",
+        )
+        if key in metadata
+    }
 
     # Payload-only theoretical throughput, in KiB/s.
     theoretical_payload_kibps = float(effective_chunk_size * max(1, fps)) / 1024.0
@@ -630,11 +675,6 @@ def run_sender(
             theoretical_payload_kibps,
         )
     )
-
-    if dump_frames:
-        _mkdir(dump_frames)
-
-    renderer = CV2Renderer(window_name=window_name, fps=fps, show_overlay=overlay)
 
     started = time.time()
     sent_frames = 0
@@ -748,112 +788,134 @@ def run_sender(
         else:
             renderer.set_window_title("SPACE pause | R reset | Q quit")
 
-    try:
+    if dump_frames:
+        _mkdir(dump_frames)
+
+    if dump_only:
+        import cv2
+
         current_item = first_frame
-        last_dump_name = None  # type: Optional[str]
-        paused = True
-        _update_window_title(paused=True)
-        while not stopped_by_user:
+        while True:
             if dump_frames:
                 dump_name = _frame_name(current_item)
-                if dump_name != last_dump_name:
-                    renderer.cv2.imwrite(
-                        os.path.join(dump_frames, dump_name), current_item["image"]
-                    )
-                    last_dump_name = dump_name
-            command = renderer.show(
-                current_item["image"],
-                overlay_text=_overlay_for_item(current_item, paused=paused),
-                pace=not paused,
-            )
-            if command == "quit":
-                stopped_by_user = True
-                break
-            if command == "reset":
-                frame_generator, first_frame = _build_sender_stream()
-                current_item = first_frame
-                paused = True
-                last_dump_name = None
-                renderer.reset_clock()
-                _update_window_title(paused=True)
-                print("sender reset: replaying from first sync frame")
-                continue
-            if command == "toggle_pause":
-                paused = not paused
-                renderer.reset_clock()
-                _update_window_title(paused=paused)
-                if paused:
-                    print("sender paused")
-                else:
-                    print("sender started")
-                continue
-            if paused:
-                continue
-
+                cv2.imwrite(os.path.join(dump_frames, dump_name), current_item["image"])
             _record_item(current_item)
             try:
                 current_item = next(frame_generator)
             except StopIteration:
-                frame_generator, first_frame = _build_sender_stream()
-                current_item = first_frame
-                last_dump_name = None
-                renderer.reset_clock()
+                break
+    else:
+        renderer = CV2Renderer(window_name=window_name, fps=fps, show_overlay=overlay)
+        try:
+            current_item = first_frame
+            last_dump_name = None  # type: Optional[str]
+            paused = True
+            _update_window_title(paused=True)
+            while not stopped_by_user:
+                if dump_frames:
+                    dump_name = _frame_name(current_item)
+                    if dump_name != last_dump_name:
+                        renderer.cv2.imwrite(
+                            os.path.join(dump_frames, dump_name), current_item["image"]
+                        )
+                        last_dump_name = dump_name
+                command = renderer.show(
+                    current_item["image"],
+                    overlay_text=_overlay_for_item(current_item, paused=paused),
+                    pace=not paused,
+                )
+                if command == "quit":
+                    stopped_by_user = True
+                    break
+                if command == "reset":
+                    frame_generator, first_frame = _build_sender_stream()
+                    current_item = first_frame
+                    paused = True
+                    last_dump_name = None
+                    renderer.reset_clock()
+                    _update_window_title(paused=True)
+                    print("sender reset: replaying from first sync frame")
+                    continue
+                if command == "toggle_pause":
+                    paused = not paused
+                    renderer.reset_clock()
+                    _update_window_title(paused=paused)
+                    if paused:
+                        print("sender paused")
+                    else:
+                        print("sender started")
+                    continue
+                if paused:
+                    continue
 
-        elapsed = max(0.001, time.time() - started)
-        observed_payload_kibps = float(sent_data_frames * effective_chunk_size) / elapsed / 1024.0
-        print(
-            "sender finished: sent_frames={0} sent_data_frames={1} observed_payload_KiBps={2:.2f}".format(
-                sent_frames,
-                sent_data_frames,
-                observed_payload_kibps,
-            )
+                _record_item(current_item)
+                try:
+                    current_item = next(frame_generator)
+                except StopIteration:
+                    frame_generator, first_frame = _build_sender_stream()
+                    current_item = first_frame
+                    last_dump_name = None
+                    renderer.reset_clock()
+        finally:
+            renderer.close()
+
+    elapsed = max(0.001, time.time() - started)
+    observed_payload_kibps = float(sent_data_frames * effective_chunk_size) / elapsed / 1024.0
+    print(
+        "sender finished: sent_frames={0} sent_data_frames={1} observed_payload_KiBps={2:.2f}".format(
+            sent_frames,
+            sent_data_frames,
+            observed_payload_kibps,
         )
+    )
 
-        if report_json:
-            sender_generation = next(
-                (
-                    item
-                    for item in control_plane_meta
-                    if item.get("family") == CONTROL_FAMILY_GENERATION
-                ),
-                None,
-            )
-            sender_layout = next(
-                (item for item in control_plane_meta if item.get("kind") == CONTROL_KIND_LAYOUT),
-                None,
-            )
-            sender_session = next(
-                (item for item in control_plane_meta if item.get("kind") == CONTROL_KIND_SESSION),
-                None,
-            )
-            report = {
-                "session_id": session_id,
-                "protocol": protocol,
-                "sent_frames": sent_frames,
-                "sent_data_frames": sent_data_frames,
-                "elapsed_s": elapsed,
-                "bytes_per_frame": effective_chunk_size,
-                "payload_chunk_count": payload_chunk_count,
-                "payload_frame_count": payload_frame_count,
-                "data_realizations": data_realizations,
-                "theoretical_payload_kibps": theoretical_payload_kibps,
-                "observed_payload_kibps": observed_payload_kibps,
-                # Backward compatibility aliases (deprecated).
-                "theoretical_goodput_kbps": theoretical_payload_kibps,
-                "observed_kbps": observed_payload_kibps,
-                "stopped_by_user": stopped_by_user,
-                "control_plane": control_plane_meta,
-                "control_plane_kinds": sorted(
-                    str(item.get("kind", "unknown")) for item in control_plane_meta
-                ),
-                "control_schema": _control_summary(),
-                "control_session": sender_session,
-                "control_layout": sender_layout,
-                "control_generation": sender_generation,
-            }
-            with open(report_json, "w", encoding="utf-8") as f:
-                json.dump(report, f, ensure_ascii=False, indent=2)
+    if report_json:
+        sender_generation = next(
+            (
+                item
+                for item in control_plane_meta
+                if item.get("family") == CONTROL_FAMILY_GENERATION
+            ),
+            None,
+        )
+        sender_layout = next(
+            (item for item in control_plane_meta if item.get("kind") == CONTROL_KIND_LAYOUT),
+            None,
+        )
+        sender_session = next(
+            (item for item in control_plane_meta if item.get("kind") == CONTROL_KIND_SESSION),
+            None,
+        )
+        report = {
+            "session_id": session_id,
+            "protocol": protocol,
+            "wire_version": str(sender_layout.get("protocol_version", "")) if isinstance(sender_layout, dict) else "",
+            "protocol_profile": {"protocol": protocol, **layered_profiles},
+            "sent_frames": sent_frames,
+            "sent_data_frames": sent_data_frames,
+            "elapsed_s": elapsed,
+            "bytes_per_frame": effective_chunk_size,
+            "payload_chunk_count": payload_chunk_count,
+            "payload_frame_count": payload_frame_count,
+            "data_realizations": data_realizations,
+            "theoretical_payload_kibps": theoretical_payload_kibps,
+            "observed_payload_kibps": observed_payload_kibps,
+            # Backward compatibility aliases (deprecated).
+            "theoretical_goodput_kbps": theoretical_payload_kibps,
+            "observed_kbps": observed_payload_kibps,
+            "stopped_by_user": stopped_by_user,
+            "dump_only": dump_only,
+            "control_plane": control_plane_meta,
+            "control_plane_kinds": sorted(
+                str(item.get("kind", "unknown")) for item in control_plane_meta
+            ),
+            "control_schema": _control_summary(),
+            "control_session": sender_session,
+            "control_layout": sender_layout,
+            "control_generation": sender_generation,
+            **layered_profiles,
+        }
+        with open(report_json, "w", encoding="utf-8") as f:
+            json.dump(report, f, ensure_ascii=False, indent=2)
 
-        return 0
-    finally:
-        renderer.close()
+    return 0

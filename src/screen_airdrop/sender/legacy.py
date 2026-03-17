@@ -44,13 +44,18 @@ def build_parser():
         "--max-epochs", type=int, default=0, help="max transmission epochs (0=unlimited)"
     )
     parser.add_argument("--dump-frames", default=None, help="directory to dump frame images")
+    parser.add_argument(
+        "--dump-only",
+        action="store_true",
+        help="dump encoded frames without opening the sender window",
+    )
     parser.add_argument("--report-json", default=None, help="path to write JSON report")
     parser.add_argument(
         "--overlay", action="store_true", help="show debug text overlay on sender window"
     )
     parser.add_argument(
         "--protocol",
-        choices=["basic", "compact"],
+        choices=["basic", "compact", "gray4", "layered"],
         default="basic",
         help="protocol name",
     )
@@ -62,10 +67,10 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    guard_band_modules = 1 if args.protocol == "compact" else 2
-    corner_size_modules = 7 if args.protocol == "compact" else 9
+    guard_band_modules = 1 if args.protocol in ("compact", "gray4", "layered") else 2
+    corner_size_modules = 7 if args.protocol in ("compact", "gray4", "layered") else 9
     schedule = BroadcastSchedule(
-        sync_frames=30,
+        sync_frames=4 if args.protocol == "layered" else 8,
         control_burst_repeat=args.manifest_repeat,
     )
     return run_sender(
@@ -80,6 +85,7 @@ def main(argv=None):
         max_epochs=args.max_epochs,
         window_name=args.window_name,
         dump_frames=args.dump_frames,
+        dump_only=args.dump_only,
         report_json=args.report_json,
         overlay=args.overlay,
         protocol=args.protocol,

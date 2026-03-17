@@ -1,3 +1,4 @@
+# pyright: reportArgumentType=false, reportOperatorIssue=false
 """Realtime/replay receiver CLI with V2 auto locator and manual ROI fallback."""
 
 from __future__ import annotations
@@ -7,7 +8,7 @@ import json
 import os
 import sys
 import time
-from typing import Any, Dict, Mapping, Optional, Tuple, cast
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, cast
 
 import numpy as np
 
@@ -18,21 +19,29 @@ from screen_airdrop.common.control_plane import (
     decode_layout_bootstrap,
     decode_session_bootstrap,
 )
+from screen_airdrop.common.ecc_rs import LAYERED_BOOTSTRAP_RS
 from screen_airdrop.common.protocol_basic import FRAME_DATA
+from screen_airdrop.common.protocol_layered import layered_bootstrap_payload_size_bytes
 from screen_airdrop.receiver.assembler import ChunkAssembler
 from screen_airdrop.receiver.capture_mss import ScreenCapture, get_monitor_region
 from screen_airdrop.receiver.decoder_basic import decode_frame_basic
 from screen_airdrop.receiver.decoder_compact import decode_frame_compact
 from screen_airdrop.receiver.decoder_gray4 import decode_frame_gray4
+from screen_airdrop.receiver.decoder_layered import (
+    decode_frame_layered,
+    decode_frame_layered_with_geometry,
+)
 from screen_airdrop.receiver.detector_basic import _bbox_from_non_black, detect_symbol_bbox
 from screen_airdrop.receiver.frame_replay_source import FrameReplaySource
 from screen_airdrop.receiver.locator_basic import LocateError as LocateErrorV31
 from screen_airdrop.receiver.locator_basic import LocatorConfig, locate_frame
-from screen_airdrop.receiver.pipeline import ReceiverPipeline
+from screen_airdrop.receiver.protocol_adapter_layered import LayeredProtocolDecoder
+from screen_airdrop.receiver.protocol_observability import make_protocol_report_adapter
 from screen_airdrop.receiver.restore import restore_payload
 from screen_airdrop.receiver.roi_policy import RoiPolicy
 from screen_airdrop.receiver.roi_profile import load_profile, save_profile
 from screen_airdrop.receiver.roi_selector import select_region
+from screen_airdrop.receiver.screen_live_runtime import ScreenLiveRuntime
 from screen_airdrop.receiver.stats import TransferStats
 from screen_airdrop.receiver.window_locator import resolve_window_region
 
@@ -57,7 +66,7 @@ def _parse_module_grid(raw: str) -> Tuple[int, int]:
 
 
 def _protocol_geometry(protocol: str) -> Tuple[int, int]:
-    if protocol in ("compact", "gray4"):
+    if protocol in ("compact", "gray4", "layered"):
         return (1, 7)
     return (2, 9)
 
@@ -76,13 +85,47 @@ def _classify_gray4_decode_failure(decode_error: Optional[str]) -> str:
     raw = "" if decode_error is None else str(decode_error).strip().lower()
     if not raw:
         return ""
-    if "payload crc mismatch" in raw or "crc mismatch" in raw:
+    if "payload rs decode failed" in raw or "payload crc mismatch" in raw or "crc mismatch" in raw:
         return "payload"
-    if "bad v3 magic" in raw or "format parity mismatch" in raw:
+    if "header rs decode failed" in raw or "bad v3 magic" in raw or "format parity mismatch" in raw:
         return "header"
     if "locator" in raw or "no_finder" in raw or "finder" in raw:
         return "locator"
     return "unknown"
+
+
+def _as_int(value: object, default: int = 0) -> int:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return int(value)
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _as_float(value: object, default: float = 0.0) -> float:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _as_mapping(value: object) -> Mapping[str, object]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _as_list(value: object) -> List[object]:
+    return list(value) if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)) else []
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -102,7 +145,7 @@ def build_parser() -> argparse.ArgumentParser:
     # Protocol and grid configuration (information/robustness parameters)
     parser.add_argument(
         "--protocol",
-        choices=["basic", "compact", "gray4"],
+        choices=["basic", "compact", "gray4", "layered"],
         default="basic",
         help="protocol name",
     )
@@ -194,6 +237,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help="number of parallel decode workers (0=auto)",
+    )
+    parser.add_argument(
+        "--prep-process",
+        type=int,
+        default=0,
+        help="screen live runtime prep mode: 0=async in coordinator, 1=dedicated prep process",
     )
     parser.add_argument(
         "--frame-queue-size",
@@ -379,7 +428,7 @@ def _should_use_pipeline(
 ) -> bool:
     return (
         source == "screen"
-        and protocol in ("basic", "compact", "gray4")
+        and protocol in ("basic", "compact", "gray4", "layered")
         and not needs_runtime_roi_selection
         and not debug_dir
     )
@@ -578,6 +627,24 @@ def _init_debug_meta(
         "gray4_avg_symbol_confidence": 0.0,
         "gray4_payload_low_conf_symbols": 0,
         "gray4_payload_variant_attempts": 0,
+        "layered_bootstrap_attempt_count": 0,
+        "layered_bootstrap_threshold": 0,
+        "layered_bootstrap_vote_margin_min": 0.0,
+        "layered_bootstrap_vote_margin_avg": 0.0,
+        "layered_control_band_decode_stage": "",
+        "layered_control_trace": {},
+        "layered_format_attempt_count": 0,
+        "layered_format_fallback_attempts": 0,
+        "layered_format_fallback_successes": 0,
+        "layered_format_primary_threshold": 0,
+        "layered_format_primary_threshold_mode": "",
+        "layered_format_fallback_threshold": -1,
+        "layered_format_vote_margin_min": 0.0,
+        "layered_format_vote_margin_avg": 0.0,
+        "layered_format_repetition_level": 0,
+        "layered_format_coords_count": 0,
+        "layered_format_mask_id_guess": -1,
+        "layered_format_trace": {},
     }
 
 
@@ -603,6 +670,47 @@ def _apply_v31_meta_to_debug(
     meta["gray4_payload_variant_attempts"] = int(
         getattr(v31_meta, "payload_variant_attempts", 0)
     )
+    meta["layered_bootstrap_attempt_count"] = int(getattr(v31_meta, "bootstrap_attempt_count", 0))
+    meta["layered_bootstrap_threshold"] = int(getattr(v31_meta, "bootstrap_threshold", 0))
+    meta["layered_bootstrap_vote_margin_min"] = float(
+        getattr(v31_meta, "bootstrap_vote_margin_min", 0.0)
+    )
+    meta["layered_bootstrap_vote_margin_avg"] = float(
+        getattr(v31_meta, "bootstrap_vote_margin_avg", 0.0)
+    )
+    meta["layered_control_band_decode_stage"] = str(
+        getattr(v31_meta, "control_band_decode_stage", "")
+    )
+    control_trace = getattr(v31_meta, "control_trace", None)
+    if isinstance(control_trace, dict):
+        meta["layered_control_trace"] = control_trace
+    meta["layered_format_attempt_count"] = int(getattr(v31_meta, "format_attempt_count", 0))
+    meta["layered_format_fallback_attempts"] = int(
+        getattr(v31_meta, "format_fallback_attempts", 0)
+    )
+    meta["layered_format_fallback_successes"] = int(
+        getattr(v31_meta, "format_fallback_successes", 0)
+    )
+    meta["layered_format_primary_threshold"] = int(
+        getattr(v31_meta, "format_primary_threshold", 0)
+    )
+    meta["layered_format_primary_threshold_mode"] = str(
+        getattr(v31_meta, "format_primary_threshold_mode", "")
+    )
+    meta["layered_format_fallback_threshold"] = int(
+        getattr(v31_meta, "format_fallback_threshold", -1)
+    )
+    meta["layered_format_vote_margin_min"] = float(
+        getattr(v31_meta, "format_vote_margin_min", 0.0)
+    )
+    meta["layered_format_vote_margin_avg"] = float(
+        getattr(v31_meta, "format_vote_margin_avg", 0.0)
+    )
+    meta["layered_format_repetition_level"] = int(
+        getattr(v31_meta, "format_repetition_level", 0)
+    )
+    meta["layered_format_coords_count"] = int(getattr(v31_meta, "format_coords_count", 0))
+    meta["layered_format_mask_id_guess"] = int(getattr(v31_meta, "format_mask_id_guess", -1))
     locator_debug = getattr(v31_meta, "locator_debug_artifacts", None)
     if isinstance(locator_debug, dict):
         if (
@@ -744,6 +852,7 @@ def _dump_debug_snapshot(
     control_generations_seen: Optional[list[int]] = None,
     decoded_chunk_id: Optional[int] = None,
     decoded_payload: Optional[bytes] = None,
+    layered_failure_trace: Optional[Dict[str, object]] = None,
 ) -> None:
     os.makedirs(debug_dir, exist_ok=True)
     raw = frame.copy()
@@ -794,6 +903,8 @@ def _dump_debug_snapshot(
             meta["decoded_plane"] = "data"
     if v31_meta is not None:
         locator_debug = _apply_v31_meta_to_debug(meta=meta, v31_meta=v31_meta)
+    if layered_failure_trace is not None:
+        meta["layered_control_trace"] = dict(layered_failure_trace)
     elif protocol_path_used == "basic":
         # When decode fails we still run locator once for debug so overlays are visible.
         locator_debug = _probe_locator_debug(
@@ -1129,6 +1240,31 @@ def main(argv=None):
     last_gray4_failure_error = None  # type: Optional[str]
     last_gray4_failure_class = ""
     gray4_failure_counts = {"header": 0, "payload": 0, "locator": 0, "unknown": 0}
+    layered_failure_counts = {
+        "control_prefix": 0,
+        "format": 0,
+        "bootstrap_rs": 0,
+        "bootstrap_crc": 0,
+        "body_rs": 0,
+        "body_crc": 0,
+    }
+    layered_bootstrap_threshold_fallback_attempts = 0
+    layered_bootstrap_threshold_fallback_successes = 0
+    layered_format_attempt_count = 0
+    layered_format_fallback_attempts = 0
+    layered_format_fallback_successes = 0
+    layered_format_primary_threshold_sum = 0.0
+    layered_format_primary_threshold_count = 0
+    layered_format_fallback_threshold_sum = 0.0
+    layered_format_fallback_threshold_count = 0
+    layered_format_vote_margin_sum = 0.0
+    layered_format_vote_margin_count = 0
+    layered_format_vote_margin_min = 0.0
+    layered_format_mask_fail_counts = {}  # type: Dict[str, int]
+    layered_format_bit_fail_counts = [0] * 80
+    layered_format_line_fail_horizontal = 0
+    layered_format_line_fail_vertical = 0
+    layered_format_fail_examples = []  # type: List[Dict[str, object]]
     first_valid_frame_ts = None  # type: Optional[float]
     first_data_frame_ts = None  # type: Optional[float]
     first_new_chunk_ts = None  # type: Optional[float]
@@ -1150,6 +1286,8 @@ def main(argv=None):
     prev_bbox = None  # type: Optional[Tuple[int, int, int, int]]
     last_det_bbox = None  # type: Optional[Tuple[int, int, int, int]]
     last_det_confidence = 0.0
+    layered_failure_trace = None  # type: Optional[Dict[str, object]]
+    protocol_report_adapter = make_protocol_report_adapter(args.protocol)
     decode_time_sum = 0.0
     decode_time_count = 0
     debug_time_sum = 0.0
@@ -1158,6 +1296,20 @@ def main(argv=None):
     v3_track_roi = None
     v3_fail_streak = 0
     v3_mode = "full" if (args.detect_mode == "full" or replay_mode) else "track"
+    layered_locked_geometry = None
+    layered_locked_fail_streak = 0
+    layered_locked_geometry_age = 0
+    layered_locked_fail_reacquire_threshold = 5
+    lock_decode_mode_geometry_reuse = 0
+    lock_decode_mode_reacquire_locator = 0
+    geometry_reuse_success_count = 0
+    geometry_reuse_fail_count = 0
+    reacquire_attempt_count = 0
+    reacquire_success_count = 0
+    reacquire_fail_count = 0
+    locked_geometry_age_max = 0
+    homography_rmse_reused_last = 0.0
+    homography_rmse_reacquired_last = 0.0
 
     def _attach_v3_metrics(report: Dict[str, object]) -> None:
         if protocol_path_used:
@@ -1184,7 +1336,7 @@ def main(argv=None):
         success_meta: Optional[object],
         failure_counts: Optional[Mapping[str, object]] = None,
     ) -> None:
-        if args.protocol != "gray4":
+        if args.protocol not in ("gray4", "layered"):
             return
         report["gray4_last_failure_error"] = "" if failure_error is None else str(failure_error)
         report["gray4_last_failure_class"] = str(failure_class or "")
@@ -1208,48 +1360,327 @@ def main(argv=None):
         report["gray4_payload_variant_attempts"] = float(
             getattr(success_meta, "payload_variant_attempts", 0)
         )
+        if args.protocol == "layered":
+            report["layered_control_path_version"] = 4.0
+            report["layered_core_header_raw_bytes"] = float(layered_bootstrap_payload_size_bytes())
+            report["layered_core_header_coded_bytes"] = float(
+                layered_bootstrap_payload_size_bytes() + int(LAYERED_BOOTSTRAP_RS.nsym)
+            )
+            report["layered_core_header_ecc_nsym"] = float(LAYERED_BOOTSTRAP_RS.nsym)
+            report["layered_core_header_attempt_count"] = float(layered_format_attempt_count)
+            report["layered_core_header_threshold_avg"] = (
+                0.0
+                if layered_format_primary_threshold_count <= 0
+                else layered_format_primary_threshold_sum / float(layered_format_primary_threshold_count)
+            )
+            report["layered_core_header_vote_margin_min"] = float(layered_format_vote_margin_min)
+            report["layered_core_header_vote_margin_avg"] = (
+                0.0
+                if layered_format_vote_margin_count <= 0
+                else layered_format_vote_margin_sum / float(layered_format_vote_margin_count)
+            )
+            report["layered_core_header_erasure_symbol_count_avg"] = 0.0
+            report["layered_core_header_erasure_symbol_count_max"] = 0.0
+            report["layered_core_header_errata_corrected_avg"] = 0.0
+            report["layered_core_header_errata_corrected_max"] = 0.0
+            report["layered_core_header_rs_fail_count"] = float(layered_failure_counts["bootstrap_rs"])
+            report["layered_core_header_crc_fail_count"] = float(layered_failure_counts["bootstrap_crc"])
+            report["layered_core_header_fail_examples"] = list(layered_format_fail_examples)
+            report["layered_control_prefix_fail_count"] = 0.0
+            report["layered_format_fail_count"] = 0.0
+            report["layered_bootstrap_attempt_count"] = float(layered_format_attempt_count)
+            report["layered_bootstrap_threshold_avg"] = (
+                0.0
+                if layered_format_primary_threshold_count <= 0
+                else layered_format_primary_threshold_sum / float(layered_format_primary_threshold_count)
+            )
+            report["layered_bootstrap_vote_margin_min"] = float(layered_format_vote_margin_min)
+            report["layered_bootstrap_vote_margin_avg"] = (
+                0.0
+                if layered_format_vote_margin_count <= 0
+                else layered_format_vote_margin_sum / float(layered_format_vote_margin_count)
+            )
+            report["layered_bootstrap_bit_fail_counts"] = list(layered_format_bit_fail_counts)
+            report["layered_bootstrap_fail_examples"] = list(layered_format_fail_examples)
+            report["layered_bootstrap_rs_fail_count"] = float(layered_failure_counts["bootstrap_rs"])
+            report["layered_bootstrap_crc_fail_count"] = float(layered_failure_counts["bootstrap_crc"])
+            report["layered_body_rs_fail_count"] = float(layered_failure_counts["body_rs"])
+            report["layered_body_crc_fail_count"] = float(layered_failure_counts["body_crc"])
+            report["layered_format_attempt_count"] = float(layered_format_attempt_count)
+            report["layered_format_fallback_attempts"] = float(layered_format_fallback_attempts)
+            report["layered_format_fallback_successes"] = float(layered_format_fallback_successes)
+            report["layered_format_primary_threshold_avg"] = (
+                0.0
+                if layered_format_primary_threshold_count <= 0
+                else layered_format_primary_threshold_sum / float(layered_format_primary_threshold_count)
+            )
+            report["layered_format_fallback_threshold_avg"] = (
+                0.0
+                if layered_format_fallback_threshold_count <= 0
+                else layered_format_fallback_threshold_sum / float(layered_format_fallback_threshold_count)
+            )
+            report["layered_format_vote_margin_min"] = float(layered_format_vote_margin_min)
+            report["layered_format_vote_margin_avg"] = (
+                0.0
+                if layered_format_vote_margin_count <= 0
+                else layered_format_vote_margin_sum / float(layered_format_vote_margin_count)
+            )
+            report["layered_format_mask_fail_counts"] = dict(layered_format_mask_fail_counts)
+            report["layered_format_bit_fail_counts"] = list(layered_format_bit_fail_counts)
+            report["layered_format_line_fail_counts"] = {
+                "horizontal": int(layered_format_line_fail_horizontal),
+                "vertical": int(layered_format_line_fail_vertical),
+            }
+            report["layered_format_fail_examples"] = list(layered_format_fail_examples)
+            report["layered_bootstrap_threshold_fallback_attempts"] = float(
+                layered_bootstrap_threshold_fallback_attempts
+            )
+            report["layered_bootstrap_threshold_fallback_successes"] = float(
+                layered_bootstrap_threshold_fallback_successes
+            )
 
-    def _sync_transfer_stats_from_pipeline(snap: Mapping[str, int | float]) -> None:
-        stats.total_frames = int(snap.get("captured", 0))
-        stats.valid_frames = int(snap.get("decode_ok", 0))
-        stats.bad_frames = int(snap.get("decode_fail", 0))
+    def _attach_protocol_debug(report: Dict[str, object]) -> None:
+        report.update(protocol_report_adapter.finalize_summary())
+
+    def _sync_transfer_stats_from_pipeline(snap: Mapping[str, object]) -> None:
+        stats.total_frames = _as_int(snap.get("captured", 0))
+        stats.valid_frames = _as_int(snap.get("decode_ok", 0))
+        stats.bad_frames = _as_int(snap.get("decode_fail", 0))
 
     def _attach_pipeline_metrics(
-        report: Dict[str, object], snap: Mapping[str, int | float]
+        report: Dict[str, object], snap: Mapping[str, object]
     ) -> None:
-        report["pipeline_captured"] = float(snap.get("captured", 0))
-        report["pipeline_decode_ok"] = float(snap.get("decode_ok", 0))
-        report["pipeline_decode_fail"] = float(snap.get("decode_fail", 0))
-        report["pipeline_decode_exceptions"] = float(snap.get("decode_exceptions", 0))
-        report["pipeline_assembled"] = float(snap.get("assembled", 0))
-        report["pipeline_assembled_bytes"] = float(snap.get("assembled_bytes", 0))
-        report["pipeline_dropped_frame_queue_full"] = float(snap.get("dropped_queue_full", 0))
-        report["pipeline_dropped_result_queue_full"] = float(
-            snap.get("dropped_result_queue_full", 0)
-        )
-        report["pipeline_duplicate_frames"] = float(snap.get("duplicate_frames", 0))
-        report["pipeline_capture_grab_time_ms"] = float(snap.get("capture_grab_time_ms", 0.0))
-        report["pipeline_capture_copy_time_ms"] = float(snap.get("capture_copy_time_ms", 0.0))
-        report["pipeline_capture_dedup_time_ms"] = float(snap.get("capture_dedup_time_ms", 0.0))
-        report["pipeline_capture_grab_ops"] = float(snap.get("capture_grab_ops", 0))
-        report["pipeline_capture_copy_ops"] = float(snap.get("capture_copy_ops", 0))
-        report["pipeline_capture_dedup_ops"] = float(snap.get("capture_dedup_ops", 0))
-        report["time_to_first_valid_frame_s"] = float(snap.get("time_to_first_valid_frame_s", 0.0))
-        report["time_to_first_data_frame_s"] = float(snap.get("time_to_first_data_frame_s", 0.0))
-        report["time_to_first_new_chunk_s"] = float(snap.get("time_to_first_new_chunk_s", 0.0))
-        report["startup_sync_frames_decoded"] = float(snap.get("startup_sync_frames_decoded", 0))
-        report["startup_control_frames_decoded"] = float(
-            snap.get("startup_control_frames_decoded", 0)
-        )
-        report["decoded_new_chunks"] = float(snap.get("decoded_new_chunks", 0))
-        report["decoded_duplicate_chunks"] = float(snap.get("decoded_duplicate_chunks", 0))
+        report["pipeline_captured"] = _as_float(snap.get("captured", 0))
+        report["pipeline_decode_ok"] = _as_float(snap.get("decode_ok", 0))
+        report["pipeline_decode_fail"] = _as_float(snap.get("decode_fail", 0))
+        report["pipeline_decode_exceptions"] = _as_float(snap.get("decode_exceptions", 0))
+        report["pipeline_assembled"] = _as_float(snap.get("assembled", 0))
+        report["pipeline_assembled_bytes"] = _as_float(snap.get("assembled_bytes", 0))
+        report["pipeline_dropped_frame_queue_full"] = _as_float(snap.get("dropped_queue_full", 0))
+        report["pipeline_dropped_result_queue_full"] = _as_float(snap.get("dropped_result_queue_full", 0))
+        report["pipeline_duplicate_frames"] = _as_float(snap.get("duplicate_frames", 0))
+        report["pipeline_capture_grab_time_ms"] = _as_float(snap.get("capture_grab_time_ms", 0.0))
+        report["pipeline_capture_copy_time_ms"] = _as_float(snap.get("capture_copy_time_ms", 0.0))
+        report["pipeline_capture_dedup_time_ms"] = _as_float(snap.get("capture_dedup_time_ms", 0.0))
+        report["pipeline_capture_grab_ops"] = _as_float(snap.get("capture_grab_ops", 0))
+        report["pipeline_capture_copy_ops"] = _as_float(snap.get("capture_copy_ops", 0))
+        report["pipeline_capture_dedup_ops"] = _as_float(snap.get("capture_dedup_ops", 0))
+        report["pipeline_ipc_recv_time_ms"] = _as_float(snap.get("ipc_recv_time_ms", 0.0))
+        report["pipeline_ipc_recv_ops"] = _as_float(snap.get("ipc_recv_ops", 0))
+        report["pipeline_fingerprint_time_ms"] = _as_float(snap.get("fingerprint_time_ms", 0.0))
+        report["pipeline_fingerprint_ops"] = _as_float(snap.get("fingerprint_ops", 0))
+        report["pipeline_materialize_time_ms"] = _as_float(snap.get("materialize_time_ms", 0.0))
+        report["pipeline_materialize_ops"] = _as_float(snap.get("materialize_ops", 0))
+        report["pipeline_dump_time_ms"] = _as_float(snap.get("dump_time_ms", 0.0))
+        report["pipeline_dump_ops"] = _as_float(snap.get("dump_ops", 0))
+        report["pipeline_dump_frames"] = _as_float(snap.get("dump_frames", 0))
+        report["pipeline_dropped_raw_queue_full"] = _as_float(snap.get("dropped_raw_queue_full", 0))
+        report["pipeline_dropped_prep_queue_full"] = _as_float(snap.get("dropped_prep_queue_full", 0))
+        report["pipeline_dropped_dump_queue_full"] = _as_float(snap.get("dropped_dump_queue_full", 0))
+        report["pipeline_shared_memory_bytes_peak"] = _as_float(snap.get("shared_memory_bytes_peak", 0))
+        report["time_to_first_valid_frame_s"] = _as_float(snap.get("time_to_first_valid_frame_s", 0.0))
+        report["time_to_first_data_frame_s"] = _as_float(snap.get("time_to_first_data_frame_s", 0.0))
+        report["time_to_first_new_chunk_s"] = _as_float(snap.get("time_to_first_new_chunk_s", 0.0))
+        report["startup_sync_frames_decoded"] = _as_float(snap.get("startup_sync_frames_decoded", 0))
+        report["startup_control_frames_decoded"] = _as_float(snap.get("startup_control_frames_decoded", 0))
+        report["decoded_new_chunks"] = _as_float(snap.get("decoded_new_chunks", 0))
+        report["decoded_duplicate_chunks"] = _as_float(snap.get("decoded_duplicate_chunks", 0))
+        protocol_debug = snap.get("protocol_debug")
+        if isinstance(protocol_debug, dict):
+            report["protocol_debug"] = dict(_as_mapping(protocol_debug))
         report["lock_state_transitions"] = {
-            "acquire_to_locked": int(snap.get("lock_acquire_to_locked", 0) or 0),
-            "locked_to_acquire": int(snap.get("lock_locked_to_acquire", 0) or 0),
+            "acquire_to_locked": _as_int(snap.get("lock_acquire_to_locked", 0)),
+            "locked_to_acquire": _as_int(snap.get("lock_locked_to_acquire", 0)),
         }
-        report["locked_decode_fail_streak_max"] = float(
-            snap.get("locked_decode_fail_streak_max", 0)
-        )
+        report["locked_decode_fail_streak_max"] = _as_float(snap.get("locked_decode_fail_streak_max", 0))
+        lock_decode_mode_counts = snap.get("lock_decode_mode_counts")
+        if isinstance(lock_decode_mode_counts, Mapping):
+            report["lock_decode_mode_counts"] = {
+                "geometry_reuse": _as_int(lock_decode_mode_counts.get("geometry_reuse", 0)),
+                "reacquire_locator": _as_int(lock_decode_mode_counts.get("reacquire_locator", 0)),
+            }
+        report["geometry_reuse_success_count"] = _as_float(snap.get("geometry_reuse_success_count", 0))
+        report["geometry_reuse_fail_count"] = _as_float(snap.get("geometry_reuse_fail_count", 0))
+        report["reacquire_attempt_count"] = _as_float(snap.get("reacquire_attempt_count", 0))
+        report["reacquire_success_count"] = _as_float(snap.get("reacquire_success_count", 0))
+        report["reacquire_fail_count"] = _as_float(snap.get("reacquire_fail_count", 0))
+        report["locked_geometry_age_max"] = _as_float(snap.get("locked_geometry_age_max", 0))
+        report["homography_rmse_reused_last"] = _as_float(snap.get("homography_rmse_reused_last", 0.0))
+        report["homography_rmse_reacquired_last"] = _as_float(snap.get("homography_rmse_reacquired_last", 0.0))
+        if args.protocol == "layered":
+            report["layered_control_path_version"] = _as_float(snap.get("layered_control_path_version", 4))
+            report["layered_core_header_raw_bytes"] = _as_float(snap.get("layered_core_header_raw_bytes", 0))
+            report["layered_core_header_coded_bytes"] = _as_float(snap.get("layered_core_header_coded_bytes", 0))
+            report["layered_core_header_ecc_nsym"] = _as_float(snap.get("layered_core_header_ecc_nsym", 0))
+            report["layered_core_header_attempt_count"] = _as_float(snap.get("layered_core_header_attempt_count", 0))
+            report["layered_core_header_threshold_avg"] = _as_float(snap.get("layered_core_header_threshold_avg", 0.0))
+            report["layered_core_header_vote_margin_min"] = _as_float(snap.get("layered_core_header_vote_margin_min", 0.0))
+            report["layered_core_header_vote_margin_avg"] = _as_float(snap.get("layered_core_header_vote_margin_avg", 0.0))
+            report["layered_core_header_erasure_symbol_count_avg"] = _as_float(snap.get("layered_core_header_erasure_symbol_count_avg", 0.0))
+            report["layered_core_header_erasure_symbol_count_max"] = _as_float(snap.get("layered_core_header_erasure_symbol_count_max", 0.0))
+            report["layered_core_header_errata_corrected_avg"] = _as_float(snap.get("layered_core_header_errata_corrected_avg", 0.0))
+            report["layered_core_header_errata_corrected_max"] = _as_float(snap.get("layered_core_header_errata_corrected_max", 0.0))
+            report["layered_core_header_rs_fail_count"] = _as_float(snap.get("layered_core_header_rs_fail_count", 0))
+            report["layered_core_header_crc_fail_count"] = _as_float(snap.get("layered_core_header_crc_fail_count", 0))
+            report["layered_core_header_fail_examples"] = _as_list(snap.get("layered_core_header_fail_examples", []))
+            report["layered_control_prefix_fail_count"] = 0.0
+            report["layered_format_fail_count"] = 0.0
+            report["layered_bootstrap_attempt_count"] = _as_float(snap.get("layered_bootstrap_attempt_count", 0))
+            report["layered_bootstrap_threshold_avg"] = _as_float(snap.get("layered_bootstrap_threshold_avg", 0.0))
+            report["layered_bootstrap_vote_margin_min"] = _as_float(snap.get("layered_bootstrap_vote_margin_min", 0.0))
+            report["layered_bootstrap_vote_margin_avg"] = _as_float(snap.get("layered_bootstrap_vote_margin_avg", 0.0))
+            report["layered_bootstrap_bit_fail_counts"] = _as_list(snap.get("layered_bootstrap_bit_fail_counts", []))
+            report["layered_bootstrap_fail_examples"] = _as_list(snap.get("layered_bootstrap_fail_examples", []))
+            report["layered_bootstrap_rs_fail_count"] = _as_float(snap.get("layered_bootstrap_rs_fail_count", 0))
+            report["layered_bootstrap_crc_fail_count"] = _as_float(snap.get("layered_bootstrap_crc_fail_count", 0))
+            report["layered_body_rs_fail_count"] = _as_float(snap.get("layered_body_rs_fail_count", 0))
+            report["layered_body_crc_fail_count"] = _as_float(snap.get("layered_body_crc_fail_count", 0))
+            report["layered_bootstrap_threshold_fallback_attempts"] = _as_float(snap.get("layered_bootstrap_threshold_fallback_attempts", 0))
+            report["layered_bootstrap_threshold_fallback_successes"] = _as_float(snap.get("layered_bootstrap_threshold_fallback_successes", 0))
+            report["layered_format_attempt_count"] = _as_float(snap.get("layered_format_attempt_count", 0))
+            report["layered_format_fallback_attempts"] = _as_float(snap.get("layered_format_fallback_attempts", 0))
+            report["layered_format_fallback_successes"] = _as_float(snap.get("layered_format_fallback_successes", 0))
+            report["layered_format_primary_threshold_avg"] = _as_float(snap.get("layered_format_primary_threshold_avg", 0.0))
+            report["layered_format_fallback_threshold_avg"] = _as_float(snap.get("layered_format_fallback_threshold_avg", 0.0))
+            report["layered_format_vote_margin_min"] = _as_float(snap.get("layered_format_vote_margin_min", 0.0))
+            report["layered_format_vote_margin_avg"] = _as_float(snap.get("layered_format_vote_margin_avg", 0.0))
+            report["layered_format_mask_fail_counts"] = dict(_as_mapping(snap.get("layered_format_mask_fail_counts", {})))
+            report["layered_format_bit_fail_counts"] = _as_list(snap.get("layered_format_bit_fail_counts", []))
+            report["layered_format_line_fail_counts"] = dict(_as_mapping(snap.get("layered_format_line_fail_counts", {})))
+            report["layered_format_fail_examples"] = _as_list(snap.get("layered_format_fail_examples", []))
+
+    def _classify_layered_decode_failure_detail(decode_error: str) -> str:
+        raw = str(decode_error).strip().lower()
+        if not raw:
+            return ""
+        if "control prefix" in raw:
+            return "control_prefix"
+        if "format parity mismatch" in raw:
+            return "format"
+        if "bootstrap rs decode failed" in raw:
+            return "bootstrap_rs"
+        if "bootstrap crc mismatch" in raw or "layered bootstrap crc mismatch" in raw:
+            return "bootstrap_crc"
+        if "payload rs decode failed" in raw:
+            return "body_rs"
+        if "payload crc mismatch" in raw or "layered body crc mismatch" in raw:
+            return "body_crc"
+        return ""
+
+    def _accumulate_layered_format_trace(trace: Mapping[str, object], *, is_failure: bool) -> None:
+        nonlocal layered_format_attempt_count
+        nonlocal layered_format_fallback_attempts
+        nonlocal layered_format_fallback_successes
+        nonlocal layered_format_primary_threshold_sum
+        nonlocal layered_format_primary_threshold_count
+        nonlocal layered_format_fallback_threshold_sum
+        nonlocal layered_format_fallback_threshold_count
+        nonlocal layered_format_vote_margin_sum
+        nonlocal layered_format_vote_margin_count
+        nonlocal layered_format_vote_margin_min
+        nonlocal layered_format_line_fail_horizontal
+        nonlocal layered_format_line_fail_vertical
+
+        layered_format_attempt_count += int(trace.get("format_attempt_count", 0) or 0)
+        layered_format_fallback_attempts += int(trace.get("format_fallback_attempts", 0) or 0)
+        layered_format_fallback_successes += int(trace.get("format_fallback_successes", 0) or 0)
+        if "format_primary_threshold" in trace:
+            layered_format_primary_threshold_sum += float(trace.get("format_primary_threshold", 0) or 0.0)
+            layered_format_primary_threshold_count += 1
+        fallback_threshold = int(trace.get("format_fallback_threshold", -1) or -1)
+        if fallback_threshold >= 0:
+            layered_format_fallback_threshold_sum += float(fallback_threshold)
+            layered_format_fallback_threshold_count += 1
+        vote_margin_min = float(trace.get("format_vote_margin_min", 0.0) or 0.0)
+        vote_margin_avg = float(trace.get("format_vote_margin_avg", 0.0) or 0.0)
+        if layered_format_vote_margin_count <= 0:
+            layered_format_vote_margin_min = vote_margin_min
+        else:
+            layered_format_vote_margin_min = min(layered_format_vote_margin_min, vote_margin_min)
+        layered_format_vote_margin_sum += vote_margin_avg
+        layered_format_vote_margin_count += 1
+        if not is_failure:
+            return
+        attempts = trace.get("attempts", [])
+        latest = attempts[-1] if isinstance(attempts, list) and attempts else {}
+        if not isinstance(latest, dict):
+            return
+        guessed_fields = latest.get("guessed_fields", {})
+        mask_key = "unknown"
+        if isinstance(guessed_fields, dict) and bool(guessed_fields.get("plausible", False)):
+            mask_key = str(int(guessed_fields.get("mask_id", -1)))
+        layered_format_mask_fail_counts[mask_key] = layered_format_mask_fail_counts.get(mask_key, 0) + 1
+        disagree_positions = latest.get("disagree_bit_positions", [])
+        if isinstance(disagree_positions, list):
+            for pos in disagree_positions:
+                idx = int(pos)
+                if 0 <= idx < len(layered_format_bit_fail_counts):
+                    layered_format_bit_fail_counts[idx] += 1
+        layered_format_line_fail_horizontal += int(latest.get("horizontal_disagree_count", 0) or 0)
+        layered_format_line_fail_vertical += int(latest.get("vertical_disagree_count", 0) or 0)
+        if len(layered_format_fail_examples) < 8:
+            layered_format_fail_examples.append(
+                {
+                    "mask_id_guess": -1 if mask_key == "unknown" else int(mask_key),
+                    "repetition_level": int(latest.get("repetition_level", 0) or 0),
+                    "threshold_mode": str(latest.get("threshold_mode", "")),
+                    "threshold_value": latest.get("threshold_value"),
+                    "vote_margin_min": float(latest.get("vote_margin_min", 0.0) or 0.0),
+                    "vote_margin_avg": float(latest.get("vote_margin_avg", 0.0) or 0.0),
+                    "horizontal_disagree_count": int(latest.get("horizontal_disagree_count", 0) or 0),
+                    "vertical_disagree_count": int(latest.get("vertical_disagree_count", 0) or 0),
+                    "disagree_bit_positions": list(latest.get("disagree_bit_positions", []) or []),
+                    "raw_bytes_hex": str(latest.get("raw_bytes_hex", "")),
+                }
+            )
+
+    def _accumulate_layered_control_trace(trace: Mapping[str, object], *, is_failure: bool) -> None:
+        nonlocal layered_format_attempt_count
+        nonlocal layered_format_primary_threshold_sum
+        nonlocal layered_format_primary_threshold_count
+        nonlocal layered_format_vote_margin_sum
+        nonlocal layered_format_vote_margin_count
+        nonlocal layered_format_vote_margin_min
+
+        layered_format_attempt_count += int(trace.get("control_prefix_attempt_count", 0) or 0)
+        if "control_prefix_threshold" in trace:
+            layered_format_primary_threshold_sum += float(
+                trace.get("control_prefix_threshold", 0) or 0.0
+            )
+            layered_format_primary_threshold_count += 1
+        vote_margin_min = float(trace.get("control_prefix_vote_margin_min", 0.0) or 0.0)
+        vote_margin_avg = float(trace.get("control_prefix_vote_margin_avg", 0.0) or 0.0)
+        if layered_format_vote_margin_count <= 0:
+            layered_format_vote_margin_min = vote_margin_min
+        else:
+            layered_format_vote_margin_min = min(layered_format_vote_margin_min, vote_margin_min)
+        layered_format_vote_margin_sum += vote_margin_avg
+        layered_format_vote_margin_count += 1
+        if not is_failure:
+            return
+        attempts = trace.get("attempts", [])
+        latest = attempts[-1] if isinstance(attempts, list) and attempts else {}
+        if not isinstance(latest, dict):
+            return
+        disagree_positions = latest.get("disagree_bit_positions", [])
+        if isinstance(disagree_positions, list):
+            for pos in disagree_positions:
+                idx = int(pos)
+                if 0 <= idx < len(layered_format_bit_fail_counts):
+                    layered_format_bit_fail_counts[idx] += 1
+        if len(layered_format_fail_examples) < 8:
+            layered_format_fail_examples.append(
+                {
+                    "mask_id_guess": int(latest.get("mask_id_guess", -1) or -1),
+                    "threshold_mode": str(latest.get("threshold_mode", "")),
+                    "threshold_value": latest.get("threshold_value"),
+                    "vote_margin_min": float(latest.get("vote_margin_min", 0.0) or 0.0),
+                    "vote_margin_avg": float(latest.get("vote_margin_avg", 0.0) or 0.0),
+                    "disagree_bit_positions": list(latest.get("disagree_bit_positions", []) or []),
+                    "raw_bytes_hex": str(latest.get("raw_bytes_hex", "")),
+                    "decode_stage": str(latest.get("decode_stage", "")),
+                }
+            )
 
     def _attach_control_plane_state(report: Dict[str, object]) -> None:
         report["control_plane_kinds"] = sorted(list(assembler.control_items.keys()))
@@ -1295,6 +1726,18 @@ def main(argv=None):
         report["startup_control_frames_decoded"] = float(startup_control_frames_decoded)
         report["decoded_new_chunks"] = float(decoded_new_chunks)
         report["decoded_duplicate_chunks"] = float(decoded_duplicate_chunks)
+        report["lock_decode_mode_counts"] = {
+            "geometry_reuse": int(lock_decode_mode_geometry_reuse),
+            "reacquire_locator": int(lock_decode_mode_reacquire_locator),
+        }
+        report["geometry_reuse_success_count"] = float(geometry_reuse_success_count)
+        report["geometry_reuse_fail_count"] = float(geometry_reuse_fail_count)
+        report["reacquire_attempt_count"] = float(reacquire_attempt_count)
+        report["reacquire_success_count"] = float(reacquire_success_count)
+        report["reacquire_fail_count"] = float(reacquire_fail_count)
+        report["locked_geometry_age_max"] = float(locked_geometry_age_max)
+        report["homography_rmse_reused_last"] = float(homography_rmse_reused_last)
+        report["homography_rmse_reacquired_last"] = float(homography_rmse_reacquired_last)
 
     # ── Pipeline mode: screen source + basic protocol ──────────────────────────
     needs_runtime_roi_selection = roi_policy.needs_runtime_selection(
@@ -1318,16 +1761,15 @@ def main(argv=None):
         grid_w, grid_h = _parse_module_grid(args.module_grid)
         guard_band, corner_size = _protocol_geometry(args.protocol)
         pipeline_seed_roi_local = _build_pipeline_seed_roi_local(source, forced_roi)
-        pipeline = ReceiverPipeline(
+        pipeline = ScreenLiveRuntime(
             capture=source,
             assembler=assembler,
-            num_workers=num_workers,
+            decode_workers=1 if num_workers is None else num_workers,
+            prep_process=args.prep_process,
             capture_fps=args.capture_fps,
-            frame_queue_size=args.frame_queue_size,
-            result_queue_size=args.result_queue_size,
             capture_dump_dir=args.capture_dump_dir,
             capture_dump_max_frames=args.capture_dump_max_frames,
-            protocol=args.protocol,  # NEW: pass protocol
+            protocol=args.protocol,
             grid_w=grid_w,
             grid_h=grid_h,
             guard_band=guard_band,
@@ -1337,9 +1779,10 @@ def main(argv=None):
             initial_search_roi=pipeline_seed_roi_local,
         )
         print(
-            "pipeline mode: protocol={0} workers={1} capture_fps={2} seed_roi={3}".format(
+            "screen live runtime: protocol={0} workers={1} prep={2} capture_fps={3} seed_roi={4}".format(
                 args.protocol,
-                num_workers if num_workers is not None else "auto",
+                1 if num_workers is None else num_workers,
+                args.prep_process,
                 args.capture_fps,
                 "none"
                 if pipeline_seed_roi_local is None
@@ -1363,8 +1806,17 @@ def main(argv=None):
                 "capture_grab_ops": 0,
                 "capture_copy_ops": 0,
                 "capture_dedup_ops": 0,
+                "ipc_recv_time_ms": 0.0,
+                "ipc_recv_ops": 0,
+                "fingerprint_time_ms": 0.0,
+                "fingerprint_ops": 0,
+                "materialize_time_ms": 0.0,
+                "materialize_ops": 0,
+                "dump_time_ms": 0.0,
+                "dump_ops": 0,
             }
             while True:
+                pipeline.check_errors()
                 now = time.time()
                 if deadline is not None and now > deadline:
                     snap = pipeline.stats.snapshot()
@@ -1394,6 +1846,13 @@ def main(argv=None):
 
                 snap = pipeline.stats.snapshot()
                 assembled = snap["assembled"]
+
+                # Check if assembly is complete
+                if assembler.complete():
+                    # Assembly complete - stop pipeline immediately
+                    pipeline.stop()
+                    break
+
                 if assembled > last_assembled:
                     last_assembled = assembled
                     last_assembled_ts = now
@@ -1459,6 +1918,12 @@ def main(argv=None):
                     decoded_now = int(snap.get("decode_ok", 0))
                     cap_fps = float(max(0, captured_now - last_fps_captured)) / elapsed_for_fps
                     dec_fps = float(max(0, decoded_now - last_fps_decoded)) / elapsed_for_fps
+                    raw_grab_fps = float(snap.get("raw_grab_fps", 0.0))
+                    prep_fps = float(snap.get("prep_fps", 0.0))
+                    accepted_fps = float(snap.get("accepted_for_decode_fps", 0.0))
+                    prep_backlog = int(snap.get("prep_backlog_frames", 0))
+                    overwrite_count = int(snap.get("capture_overwrite_count", 0))
+                    decode_queue_depth = int(snap.get("decode_queue_depth", 0))
                     grab_ops_now = int(snap.get("capture_grab_ops", 0))
                     copy_ops_now = int(snap.get("capture_copy_ops", 0))
                     dedup_ops_now = int(snap.get("capture_dedup_ops", 0))
@@ -1481,13 +1946,41 @@ def main(argv=None):
                         float(snap.get("capture_copy_time_ms", 0.0))
                         - float(last_capture_timing["capture_copy_time_ms"]),
                     ) / float(max(1, copy_ops_delta))
+                    ipc_ops_now = int(snap.get("ipc_recv_ops", 0))
+                    ipc_ops_delta = max(0, ipc_ops_now - int(last_capture_timing["ipc_recv_ops"]))
+                    ipc_recv_ms = max(
+                        0.0,
+                        float(snap.get("ipc_recv_time_ms", 0.0))
+                        - float(last_capture_timing["ipc_recv_time_ms"]),
+                    ) / float(max(1, ipc_ops_delta))
                     dedup_ms = max(
                         0.0,
                         float(snap.get("capture_dedup_time_ms", 0.0))
                         - float(last_capture_timing["capture_dedup_time_ms"]),
                     ) / float(max(1, dedup_ops_delta))
+                    fp_ops_now = int(snap.get("fingerprint_ops", 0))
+                    fp_ops_delta = max(0, fp_ops_now - int(last_capture_timing["fingerprint_ops"]))
+                    fp_ms = max(
+                        0.0,
+                        float(snap.get("fingerprint_time_ms", 0.0))
+                        - float(last_capture_timing["fingerprint_time_ms"]),
+                    ) / float(max(1, fp_ops_delta))
+                    mat_ops_now = int(snap.get("materialize_ops", 0))
+                    mat_ops_delta = max(0, mat_ops_now - int(last_capture_timing["materialize_ops"]))
+                    mat_ms = max(
+                        0.0,
+                        float(snap.get("materialize_time_ms", 0.0))
+                        - float(last_capture_timing["materialize_time_ms"]),
+                    ) / float(max(1, mat_ops_delta))
+                    dump_ops_now = int(snap.get("dump_ops", 0))
+                    dump_ops_delta = max(0, dump_ops_now - int(last_capture_timing["dump_ops"]))
+                    dump_ms = max(
+                        0.0,
+                        float(snap.get("dump_time_ms", 0.0))
+                        - float(last_capture_timing["dump_time_ms"]),
+                    ) / float(max(1, dump_ops_delta))
                     print(
-                        "captured={0} decoded={1} assembled={2} missing={3} dropped={4} dedup={5} cap_fps={6:.2f} dec_fps={7:.2f} rx_KBps={8:.2f} grab_ms={9:.2f} copy_ms={10:.2f} dedup_ms={11:.2f}".format(
+                        "captured={0} decoded={1} assembled={2} missing={3} dropped={4} dedup={5} cap_fps={6:.2f} raw_grab_fps={7:.2f} prep_fps={8:.2f} accepted_fps={9:.2f} dec_fps={10:.2f} prep_backlog={11} overwrite={12} decode_q={13} rx_KBps={14:.2f} grab_ms={15:.2f} copy_ms={16:.2f} ipc_recv_ms={17:.2f} dedup_ms={18:.2f} fp_ms={19:.2f} mat_ms={20:.2f} dump_ms={21:.2f}".format(
                             snap["captured"],
                             snap["decode_ok"],
                             snap["assembled"],
@@ -1497,11 +1990,21 @@ def main(argv=None):
                             ),
                             snap["duplicate_frames"],
                             cap_fps,
+                            raw_grab_fps,
+                            prep_fps,
+                            accepted_fps,
                             dec_fps,
+                            prep_backlog,
+                            overwrite_count,
+                            decode_queue_depth,
                             rx_kBps,
                             grab_ms,
                             copy_ms,
+                            ipc_recv_ms,
                             dedup_ms,
+                            fp_ms,
+                            mat_ms,
+                            dump_ms,
                         )
                     )
                     last_rate_ts = now
@@ -1516,6 +2019,14 @@ def main(argv=None):
                         "capture_grab_ops": grab_ops_now,
                         "capture_copy_ops": copy_ops_now,
                         "capture_dedup_ops": dedup_ops_now,
+                        "ipc_recv_time_ms": float(snap.get("ipc_recv_time_ms", 0.0)),
+                        "ipc_recv_ops": ipc_ops_now,
+                        "fingerprint_time_ms": float(snap.get("fingerprint_time_ms", 0.0)),
+                        "fingerprint_ops": fp_ops_now,
+                        "materialize_time_ms": float(snap.get("materialize_time_ms", 0.0)),
+                        "materialize_ops": mat_ops_now,
+                        "dump_time_ms": float(snap.get("dump_time_ms", 0.0)),
+                        "dump_ops": dump_ops_now,
                     }
                     next_stats_ts = now + max(0.1, args.stats_interval)
 
@@ -1565,9 +2076,15 @@ def main(argv=None):
             )
             return 0
         except KeyboardInterrupt:
-            pass
+            print("\nreceiver interrupted: stopping pipeline and cleaning up...")
+            pipeline.stop()
         finally:
             pipeline.join(timeout=3.0)
+            runtime_error = None
+            try:
+                pipeline.check_errors()
+            except RuntimeError as exc:
+                runtime_error = exc
             if final_report is None:
                 snap = pipeline.stats.snapshot()
                 _sync_transfer_stats_from_pipeline(snap)
@@ -1589,6 +2106,8 @@ def main(argv=None):
                     },
                 )
                 report["status"] = "aborted"
+                if runtime_error is not None:
+                    report["error"] = str(runtime_error)
                 _write_report(args.report_json, report)
         return 1
     # ── Legacy single-thread mode ────────────────────────────────────────────
@@ -1621,6 +2140,7 @@ def main(argv=None):
                 final_report["status"] = "timeout_max_seconds"
                 _attach_v3_metrics(final_report)
                 _attach_missing_chunks_state(final_report)
+                _attach_protocol_debug(final_report)
                 _write_report(args.report_json, final_report)
                 print("receiver timeout: max-seconds reached")
                 return 2
@@ -1632,6 +2152,7 @@ def main(argv=None):
                 final_report["status"] = "timeout_idle"
                 _attach_v3_metrics(final_report)
                 _attach_missing_chunks_state(final_report)
+                _attach_protocol_debug(final_report)
                 _write_report(args.report_json, final_report)
                 print("receiver timeout: no valid frames for {0}s".format(args.max_idle_seconds))
                 return 2
@@ -1659,7 +2180,8 @@ def main(argv=None):
 
             try:
                 t_decode0 = time.perf_counter()
-                if args.protocol in ("basic", "compact", "gray4"):
+                if args.protocol in ("basic", "compact", "gray4", "layered"):
+                    layered_failure_trace = None
                     last_grid_exc = None
                     if replay_mode:
                         v31_mode = "full"
@@ -1674,6 +2196,7 @@ def main(argv=None):
                     )
                     roi_only = manual_strict
                     decode_fn = (
+                        decode_frame_layered if args.protocol == "layered" else
                         decode_frame_gray4 if args.protocol == "gray4" else
                         decode_frame_compact if args.protocol == "compact" else decode_frame_basic
                     )
@@ -1681,26 +2204,61 @@ def main(argv=None):
                     for gw, gh in grid_candidates:
                         decode_attempt_total += 1
                         try:
-                            header, payload, meta31 = decode_fn(
-                                frame=frame,
-                                detect_mode=v31_mode,
-                                forced_roi=manual_decode_roi_local
-                                if manual_strict
-                                else v3_track_roi,
-                                grid_w=gw,
-                                grid_h=gh,
-                                guard_band=guard_band,
-                                corner_size=corner_size,
-                                roi_only=roi_only,
-                                manual_strict=manual_strict,
-                                locator_engine=args.locator_engine,
-                                locator_confidence_threshold=args.locator_confidence_threshold,
-                            )
+                            if args.protocol == "layered" and layered_locked_geometry is not None:
+                                lock_decode_mode_geometry_reuse += 1
+                                header, payload, meta31 = decode_frame_layered_with_geometry(
+                                    frame=frame,
+                                    geometry=layered_locked_geometry,
+                                    grid_w=gw,
+                                    grid_h=gh,
+                                    guard_band=guard_band,
+                                    corner_size=corner_size,
+                                )
+                                geometry_reuse_success_count += 1
+                                layered_locked_geometry_age += 1
+                                if layered_locked_geometry_age > locked_geometry_age_max:
+                                    locked_geometry_age_max = layered_locked_geometry_age
+                                homography_rmse_reused_last = float(
+                                    getattr(meta31, "homography_rmse", 0.0) or 0.0
+                                )
+                            else:
+                                lock_decode_mode_reacquire_locator += 1
+                                reacquire_attempt_count += 1
+                                header, payload, meta31 = decode_fn(
+                                    frame=frame,
+                                    detect_mode=v31_mode,
+                                    forced_roi=manual_decode_roi_local
+                                    if manual_strict
+                                    else v3_track_roi,
+                                    grid_w=gw,
+                                    grid_h=gh,
+                                    guard_band=guard_band,
+                                    corner_size=corner_size,
+                                    roi_only=roi_only,
+                                    manual_strict=manual_strict,
+                                    locator_engine=args.locator_engine,
+                                    locator_confidence_threshold=args.locator_confidence_threshold,
+                                )
+                                reacquire_success_count += 1
+                                homography_rmse_reacquired_last = float(
+                                    getattr(meta31, "homography_rmse", 0.0) or 0.0
+                                )
+                                layered_locked_geometry_age = 0
                             decode_attempt_total += max(0, int(meta31.decode_attempts) - 1)
                             grid_w, grid_h = gw, gh
                             break
                         except Exception as grid_exc:  # noqa: PERF203
                             last_grid_exc = grid_exc
+                            if args.protocol == "layered" and layered_locked_geometry is not None:
+                                geometry_reuse_fail_count += 1
+                                layered_locked_fail_streak += 1
+                                if layered_locked_fail_streak >= layered_locked_fail_reacquire_threshold:
+                                    layered_locked_geometry = None
+                                    layered_locked_fail_streak = 0
+                                    layered_locked_geometry_age = 0
+                                continue
+                            if args.protocol == "layered":
+                                reacquire_fail_count += 1
                             # Per-frame recovery: if track path fails, retry the same frame in full mode.
                             if not replay_mode and not manual_strict and v31_mode == "track":
                                 try:
@@ -1728,6 +2286,11 @@ def main(argv=None):
                     stats.on_locator(confidence=float(meta31.det_confidence), failed=False)
                     frame_v31_meta = meta31
                     last_v31_meta = meta31
+                    protocol_report_adapter.accumulate_success(meta31)
+                    if args.protocol == "layered":
+                        trace = getattr(meta31, "control_trace", None)
+                        if isinstance(trace, dict):
+                            _accumulate_layered_control_trace(trace, is_failure=False)
                     protocol_path_used = args.protocol
                     last_det_bbox = meta31.det_bbox
                     last_det_confidence = float(meta31.det_confidence)
@@ -1736,6 +2299,11 @@ def main(argv=None):
                     locator_legacy_used = bool(meta31.legacy_used)
                     locator_legacy_elapsed_ms = float(meta31.legacy_elapsed_ms)
                     v3_fail_streak = 0
+                    if args.protocol == "layered":
+                        geometry = LayeredProtocolDecoder.geometry_from_meta(meta31)
+                        if geometry is not None:
+                            layered_locked_geometry = geometry
+                        layered_locked_fail_streak = 0
                     bx, by, bw, bh = meta31.det_bbox
                     if prev_bbox is not None:
                         px, py, pw, ph = prev_bbox
@@ -1756,11 +2324,11 @@ def main(argv=None):
                         v3_mode = "track"
                 else:
                     raise ValueError(
-                        f"Protocol '{args.protocol}' not supported, use 'basic', 'compact', or 'gray4'"
+                        f"Protocol '{args.protocol}' not supported, use 'basic', 'compact', 'gray4', or 'layered'"
                     )
                 auto_fail_count = 0
                 last_decode_error = None
-                if args.protocol == "gray4":
+                if args.protocol in ("gray4", "layered"):
                     last_gray4_failure_error = None
                     last_gray4_failure_class = ""
                 if first_valid_frame_ts is None:
@@ -1789,13 +2357,28 @@ def main(argv=None):
                     pass
                 else:
                     last_decode_error = str(last_exc)
-                    if args.protocol == "gray4":
+                    if args.protocol in ("gray4", "layered"):
                         last_gray4_failure_error = last_decode_error
                         last_gray4_failure_class = _classify_gray4_decode_failure(last_decode_error)
+                        protocol_report_adapter.accumulate_failure(
+                            last_decode_error,
+                            failure_class=last_gray4_failure_class,
+                            trace=getattr(last_exc, "trace", None),
+                        )
                         if last_gray4_failure_class in gray4_failure_counts:
                             gray4_failure_counts[last_gray4_failure_class] += 1
                         elif last_gray4_failure_class:
                             gray4_failure_counts["unknown"] += 1
+                        if args.protocol == "layered":
+                            layered_detail = _classify_layered_decode_failure_detail(last_decode_error)
+                            if layered_detail in layered_failure_counts:
+                                layered_failure_counts[layered_detail] += 1
+                            trace = getattr(last_exc, "trace", None)
+                            if isinstance(trace, dict):
+                                layered_failure_trace = dict(trace)
+                                _accumulate_layered_control_trace(
+                                    trace, is_failure=(layered_detail == "control_prefix")
+                                )
                     if args.protocol in ("basic", "compact"):
                         v3_fail_streak += 1
                         # Fast recovery: return to full search after a few consecutive misses.
@@ -1868,6 +2451,7 @@ def main(argv=None):
                                 "grid_w": grid_w,
                                 "grid_h": grid_h,
                                 "locator_confidence_threshold": args.locator_confidence_threshold,
+                                "layered_failure_trace": layered_failure_trace,
                                 **_debug_control_plane_state(),
                             },
                         )
@@ -1905,6 +2489,7 @@ def main(argv=None):
                         "grid_w": grid_w,
                         "grid_h": grid_h,
                         "locator_confidence_threshold": args.locator_confidence_threshold,
+                        "layered_failure_trace": None,
                         **_debug_control_plane_state(),
                         "decoded_chunk_id": int(header.chunk_id),
                         "decoded_payload": payload,
@@ -1965,6 +2550,7 @@ def main(argv=None):
                     success_meta=last_v31_meta,
                     failure_counts=gray4_failure_counts,
                 )
+                _attach_protocol_debug(final_report)
                 if last_v3_meta is not None:
                     final_report["protocol_version_used"] = float(last_v3_meta.protocol_version_used)
                     final_report["det_confidence"] = float(last_v3_meta.det_confidence)
@@ -2050,6 +2636,7 @@ def main(argv=None):
             success_meta=last_v31_meta,
             failure_counts=gray4_failure_counts,
         )
+        _attach_protocol_debug(final_report)
         _write_report(args.report_json, final_report)
         print("receiver ended: source exhausted")
         return 1
@@ -2069,6 +2656,7 @@ def main(argv=None):
                 success_meta=last_v31_meta,
                 failure_counts=gray4_failure_counts,
             )
+            _attach_protocol_debug(report)
             _write_report(args.report_json, report)
 
 

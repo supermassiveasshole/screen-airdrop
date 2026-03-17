@@ -1,3 +1,4 @@
+# pyright: reportArgumentType=false
 """Compact protocol wiring tests."""
 
 from __future__ import annotations
@@ -54,6 +55,11 @@ def test_receiver_parser_accepts_gray4_protocol():
     assert args.protocol == "gray4"
 
 
+def test_receiver_parser_accepts_layered_protocol():
+    args = build_receiver_parser().parse_args(["--protocol", "layered"])
+    assert args.protocol == "layered"
+
+
 def test_receiver_parser_accepts_pipeline_queue_overrides():
     args = build_receiver_parser().parse_args(
         ["--frame-queue-size", "96", "--result-queue-size", "512"]
@@ -93,6 +99,21 @@ def test_receiver_pipeline_uses_gray4_geometry_defaults():
 
     assert len(pipeline._decode_workers) == 1
     kwargs = gray4_decoder.call_args.kwargs
+    assert kwargs["guard_band"] == 1
+    assert kwargs["corner_size"] == 7
+
+
+def test_receiver_pipeline_uses_layered_geometry_defaults():
+    with patch("screen_airdrop.receiver.pipeline.LayeredProtocolDecoder") as layered_decoder:
+        pipeline = ReceiverPipeline(
+            capture=_DummyCapture(),
+            assembler=object(),
+            protocol="layered",
+            num_workers=1,
+        )
+
+    assert len(pipeline._decode_workers) == 1
+    kwargs = layered_decoder.call_args.kwargs
     assert kwargs["guard_band"] == 1
     assert kwargs["corner_size"] == 7
 
@@ -145,6 +166,15 @@ def test_gray4_uses_pipeline_when_debug_disabled():
     )
 
 
+def test_layered_uses_pipeline_when_debug_disabled():
+    assert _should_use_pipeline(
+        source="screen",
+        protocol="layered",
+        debug_dir=None,
+        needs_runtime_roi_selection=False,
+    )
+
+
 def test_modern_sender_gray4_defaults_to_higher_manifest_repeat():
     with patch("screen_airdrop.sender.modern.run_sender", return_value=0) as run_sender:
         from screen_airdrop.sender.modern import main as modern_main
@@ -155,7 +185,20 @@ def test_modern_sender_gray4_defaults_to_higher_manifest_repeat():
     kwargs = run_sender.call_args.kwargs
     assert kwargs["protocol"] == "gray4"
     assert kwargs["manifest_repeat"] == 8
-    assert kwargs["schedule"] == BroadcastSchedule(sync_frames=30, control_burst_repeat=8)
+    assert kwargs["schedule"] == BroadcastSchedule(sync_frames=8, control_burst_repeat=8)
+
+
+def test_modern_sender_layered_uses_layered_startup_defaults():
+    with patch("screen_airdrop.sender.modern.run_sender", return_value=0) as run_sender:
+        from screen_airdrop.sender.modern import main as modern_main
+
+        rc = modern_main(["input.bin", "--protocol", "layered"])
+
+    assert rc == 0
+    kwargs = run_sender.call_args.kwargs
+    assert kwargs["protocol"] == "layered"
+    assert kwargs["manifest_repeat"] == 4
+    assert kwargs["schedule"] == BroadcastSchedule(sync_frames=4, control_burst_repeat=4)
 
 
 def test_sender_parsers_accept_manifest_repeat_override():

@@ -15,3 +15,7 @@ recovered/
 
 # macOS finder metadata
 .DS_Store
+
+# vibe coding
+.claude/
+.codex/

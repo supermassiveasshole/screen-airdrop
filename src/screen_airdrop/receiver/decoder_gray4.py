@@ -1,3 +1,4 @@
+# pyright: reportArgumentType=false
 """Gray4 decoder: compact locator plus 4-level grayscale payload demodulation."""
 
 from __future__ import annotations

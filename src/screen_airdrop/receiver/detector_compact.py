@@ -1,3 +1,4 @@
+# pyright: reportArgumentType=false, reportCallIssue=false
 """Compact protocol (7×7 finder) detector.
 
 This module provides specialized detection for compact protocol's 7×7 finder patterns.

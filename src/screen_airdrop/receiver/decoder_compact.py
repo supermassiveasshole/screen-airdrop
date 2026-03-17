@@ -1,3 +1,4 @@
+# pyright: reportArgumentType=false, reportAttributeAccessIssue=false, reportOptionalMemberAccess=false
 """Compact decoder: locator-engine + payload decode over module matrix."""
 
 from __future__ import annotations

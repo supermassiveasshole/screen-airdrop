@@ -7,6 +7,13 @@ import numpy as np
 from screen_airdrop.receiver.cli import main as receiver_main
 from screen_airdrop.sender.controller import build_encoded_frames, run_sender
 
+from ..helpers.dump_replay import dump_and_replay
+from ..helpers.protocol_fixture_factory import create_payload_tree
+from ..helpers.report_assertions import (
+    assert_protocol_debug_structure,
+    assert_stable_report_fields,
+)
+
 
 def _dir_hash(path: Path) -> str:
     import hashlib
@@ -134,3 +141,64 @@ def test_sender_report_includes_control_plane_schema(tmp_path: Path):
     assert rep["control_session"]["kind"] == "session"
     assert rep["control_layout"]["kind"] == "layout"
     assert rep["control_generation"]["kind"] == "generation"
+
+
+def test_sender_can_dump_frames_without_renderer(tmp_path: Path):
+    src = tmp_path / "sender-src"
+    src.mkdir()
+    (src / "payload.txt").write_text("hello dump only")
+
+    frame_dir = tmp_path / "sender-frames"
+    report = tmp_path / "sender-report.json"
+
+    code = run_sender(
+        input_path=str(src),
+        dump_frames=str(frame_dir),
+        dump_only=True,
+        report_json=str(report),
+        fps=12,
+        max_epochs=1,
+        overlay=False,
+        protocol="layered",
+        module_grid="224x136",
+        chunk_size=2048,
+        stats_interval=0.1,
+    )
+
+    assert code == 0
+    dumped = list(frame_dir.iterdir())
+    assert dumped
+    rep = json.loads(report.read_text(encoding="utf-8"))
+    assert rep["dump_only"] is True
+    assert rep["protocol"] == "layered"
+    assert rep["sent_frames"] > 0
+
+
+def test_layered_dump_replay_report_has_protocol_debug(tmp_path: Path):
+    src = create_payload_tree(tmp_path, name="layered-src")
+    replay_report, out_dir = dump_and_replay(
+        tmp_path,
+        src=src,
+        protocol="layered",
+        module_grid="224x136",
+    )
+    assert_stable_report_fields(replay_report)
+    assert_protocol_debug_structure(replay_report, "layered")
+    assert replay_report["status"] == "ok"
+    assert replay_report["missing_chunks"] == 0
+    assert (out_dir / src.name).exists()
+
+
+def test_gray4_dump_replay_report_has_protocol_debug(tmp_path: Path):
+    src = create_payload_tree(tmp_path, name="gray4-src")
+    replay_report, out_dir = dump_and_replay(
+        tmp_path,
+        src=src,
+        protocol="gray4",
+        module_grid="100x60",
+    )
+    assert_stable_report_fields(replay_report)
+    assert_protocol_debug_structure(replay_report, "gray4")
+    assert replay_report["status"] == "ok"
+    assert replay_report["missing_chunks"] == 0
+    assert (out_dir / src.name).exists()

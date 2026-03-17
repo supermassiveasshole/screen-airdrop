@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
 ## What this project is
 
@@ -46,9 +46,8 @@ uv run python bench/summarize.py
 ### Package layout (`src/screen_airdrop/`)
 
 - **`common/`** — shared code that must stay Python 3.7 compatible:
-  - `protocol_*.py` — protocol frame headers and packing logic for each protocol variant
-  - `layout_*.py` — layout dataclasses defining grid geometry contracts
-  - `ecc_rs.py` — Reed-Solomon error correction codec
+  - `protocol_basic.py` — basic protocol frame header, ECC level definitions (`SAR3`)
+  - `layout_basic.py` — `LayoutInfoBasic` dataclass (four-corner fixed-grid contract)
   - `manifest.py` — session manifest (JSON: file list, SHA-256, chunk params)
   - `packing.py` — tar/gzip pack and unpack helpers
   - `errors.py` — typed error codes (E1001–E3002)
@@ -56,37 +55,24 @@ uv run python bench/summarize.py
 - **`sender/`** — encodes and plays frames on screen:
   - `modern.py` / `legacy.py` — CLI entrypoints; legacy targets Python 3.7.6 with stdlib only
   - `controller.py` — orchestrates pack → encode → render loop
-  - `encoder_*.py` — protocol-specific frame renderers (basic, compact, gray4, layered)
-  - `protocol_adapter_*.py` — protocol-specific frame generation adapters
+  - `encoder_basic.py` — basic protocol frame renderer
   - `renderer_cv2.py` — OpenCV window display loop
 
 - **`receiver/`** — captures screen and reconstructs files:
   - `cli.py` — unified receiver CLI
-  - `pipeline.py` — main receiver orchestration and state machine
-  - `screen_live_runtime.py` — live screen capture runtime
-  - `capture_mss.py` — MSS screen capture backend
+  - `capture_mss.py` — MSS screen capture
   - `locator_basic.py` — four-corner finder patterns locator
-  - `detector_*.py` — protocol-specific symbol bounding box detection
-  - `decoder_*.py` — protocol-specific grid sampling and decoding (basic, compact, gray4, layered)
-  - `protocol_adapter_*.py` — protocol-specific decode adapters
-  - `protocol_observability.py` — decode metrics and diagnostics
+  - `detector_basic.py` / `detector_v31_basic.py` — symbol bounding box detection
+  - `decoder_basic.py` — grid sampling → bits → frame header + payload
   - `assembler.py` — chunk deduplication and completion tracking
   - `restore.py` — reassemble payload, decompress, SHA-256 verify
   - `stats.py` — real-time throughput/FPS/ETA metrics
   - `roi_selector.py` / `roi_profile.py` — interactive region selection and persistence
   - `frame_replay_source.py` — replay pre-captured frames for offline testing
-  - `runtime/` — receiver runtime coordination and slot management
 
-### Protocols
+### Protocol
 
-Multiple protocol variants are implemented, each with different encoding strategies:
-
-- **basic** (magic: `SAR3`) — four-corner fixed-grid, binary 1-bit modules, module-center sampling
-- **compact** — optimized variant with tighter packing
-- **gray4** — 2-bit grayscale encoding (4 levels) for higher information density
-- **layered** (magic: `SARL`) — gray4-based with Reed-Solomon FEC on bootstrap and body layers
-
-All protocols share the same high-level flow: sync frames for calibration, data frames with headers + payload, and end frames. The receiver auto-detects protocol from magic bytes.
+The current protocol is **basic** (magic bytes: `SAR3`). It uses four-corner fixed-grid, module-center sampling, and `LayoutInfoBasic` embedded in sync frames. A future **fountain** (喷泉码) protocol is planned.
 
 ### Python version constraints
 
@@ -100,14 +86,3 @@ All protocols share the same high-level flow: sync frames for calibration, data 
 - `tests/integration/` — loopback and lossy frame pipeline tests
 - `tests/e2e/` — real captured frame datasets (marker: `real_data`, `regression_data`)
 - Fixtures with real frame data live in `tests/fixtures/real_data/`
-
-### Benchmarking
-
-The `bench/` directory contains performance measurement tools:
-
-- `compare_protocols.py` — synthetic CPU benchmarks for encode/decode across protocols
-- `compare_decode_real.py` — decode benchmarks using real captured frames
-- `compare_end_to_end.py` — full pipeline benchmarks (replay or live)
-- `summarize.py` — aggregates benchmark results into `bench/results/summary.md`
-
-Key metrics: `goodput_kibps` (effective payload throughput), `valid_frame_rate_fps`, `bad_frame_rate`, `decode_attempts_per_frame`
