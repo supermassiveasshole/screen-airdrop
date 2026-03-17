@@ -19,7 +19,7 @@ def _as_float(value: object, default: float = 0.0) -> float:
     if isinstance(value, (int, float)):
         return float(value)
     try:
-        return float(value)
+        return float(value)  # type: ignore[arg-type]
     except Exception:
         return default
 
@@ -33,7 +33,7 @@ def _as_int(value: object, default: int = 0) -> int:
     if isinstance(value, (int, float)):
         return int(value)
     try:
-        return int(value)
+        return int(value)  # type: ignore[arg-type]
     except Exception:
         return default
 
@@ -120,10 +120,10 @@ class ReportBuilder:
 
         if failure_counts is not None:
             report["gray4_failure_counts"] = {
-                "header": int(failure_counts.get("header", 0) or 0),
-                "payload": int(failure_counts.get("payload", 0) or 0),
-                "locator": int(failure_counts.get("locator", 0) or 0),
-                "unknown": int(failure_counts.get("unknown", 0) or 0),
+                "header": int(failure_counts.get("header", 0) or 0),  # type: ignore[arg-type]
+                "payload": int(failure_counts.get("payload", 0) or 0),  # type: ignore[arg-type]
+                "locator": int(failure_counts.get("locator", 0) or 0),  # type: ignore[arg-type]
+                "unknown": int(failure_counts.get("unknown", 0) or 0),  # type: ignore[arg-type]
             }
 
         if success_meta is None:
@@ -323,21 +323,21 @@ class ReportBuilder:
                 snap.get("layered_core_header_vote_margin_avg", 0.0)
             )
 
-    def attach_control_plane_state(self, report: Dict[str, object]) -> None:
+    def attach_control_plane_state(self, report: Dict[str, object], assembler) -> None:
         """Attach control plane state to report.
 
         Args:
             report: Report dictionary to update
+            assembler: ChunkAssembler instance
         """
-        from screen_airdrop.common.control_plane import (
-            _GENERATION_CONTROL_STATE,
-            _LAYOUT_BOOTSTRAP_STATE,
-            _SESSION_BOOTSTRAP_STATE,
-        )
-
-        report["control_plane_session_bootstrap"] = dict(_SESSION_BOOTSTRAP_STATE)
-        report["control_plane_layout_bootstrap"] = dict(_LAYOUT_BOOTSTRAP_STATE)
-        report["control_plane_generation_control"] = dict(_GENERATION_CONTROL_STATE)
+        report["control_plane_kinds"] = sorted(list(assembler.control_items.keys()))
+        if assembler.session_info is not None:
+            report["control_session"] = dict(assembler.session_info)
+        if assembler.layout_info is not None:
+            report["control_layout"] = dict(assembler.layout_info)
+        if assembler.generation_info is not None:
+            report["control_generation"] = dict(assembler.generation_info)
+        report["control_generations_seen"] = sorted(int(k) for k in assembler.generations.keys())
 
     def attach_missing_chunks_state(
         self, report: Dict[str, object], assembler
