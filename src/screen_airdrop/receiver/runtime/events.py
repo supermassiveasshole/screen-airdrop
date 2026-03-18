@@ -1,7 +1,7 @@
 """Event and data classes for runtime pipeline."""
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 from screen_airdrop.receiver.runtime.geometry_tracker import GeometryState
 
@@ -28,6 +28,7 @@ class FilledSlotEvent:
 
     descriptor: FrameSlotDescriptor
     grab_ms: float
+    copy_ms: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -83,6 +84,7 @@ class DecodeCompletion:
     success: bool
     error: str = ""
     failure_class: str = ""
+    context: Optional[Dict[str, Any]] = None
     meta: Any = None
     frame_id: int = -1
     frame_type: int = -1

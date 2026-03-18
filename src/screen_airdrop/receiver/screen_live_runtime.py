@@ -3,22 +3,20 @@
 import asyncio
 import multiprocessing as mp
 import queue
-import signal
 import threading
 import time
 from multiprocessing import shared_memory
 from multiprocessing.process import BaseProcess
-from types import SimpleNamespace
-from typing import Any, List, Mapping, Optional, Protocol, Tuple, cast
+from typing import Any, Dict, List, Mapping, Optional, Protocol, Tuple, cast
 
 import numpy as np
 
-from screen_airdrop.common.control_plane import control_kind_from_wire_chunk_id
-from screen_airdrop.common.protocol_basic import DEFAULT_GRID_H, DEFAULT_GRID_W, FRAME_DATA
+from screen_airdrop.common.protocol_basic import DEFAULT_GRID_H, DEFAULT_GRID_W
 from screen_airdrop.receiver.assembler import ChunkAssembler
 from screen_airdrop.receiver.capture_mss import get_monitor_region
 from screen_airdrop.receiver.locator_basic import LocateError
 from screen_airdrop.receiver.protocol_observability import make_protocol_report_adapter
+from screen_airdrop.receiver.runtime.base_pipeline import BasePipeline
 from screen_airdrop.receiver.runtime.events import (
     DecodeAssignment,
     DecodeCompletion,
@@ -109,14 +107,12 @@ def _close_queue(q: object) -> None:
             pass
 
 
-def _ignore_sigint_in_child() -> None:
-    try:
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
-    except Exception:
-        pass
+class ScreenLiveRuntime(BasePipeline):
+    """Fixed-slot subprocess runtime for live screen capture.
 
+    实现 BasePipeline 接口，提供多进程高性能 pipeline。
+    """
 
-class ScreenLiveRuntime:
     def __init__(
         self,
         *,
@@ -138,6 +134,13 @@ class ScreenLiveRuntime:
     ) -> None:
         if int(prep_process) not in (0, 1):
             raise ValueError("prep_process must be 0 or 1")
+
+        # Initialize BasePipeline
+        super().__init__(protocol)
+
+        # Create report_collector (will be initialized in start() after assembler is available)
+        self.report_collector = None
+
         self._capture = capture
         self._assembler = assembler
         self._protocol = protocol
@@ -199,7 +202,10 @@ class ScreenLiveRuntime:
 
         # Create locator function based on mode
         from screen_airdrop.receiver.frame_locator import FrameLocator
-        from screen_airdrop.receiver.locator_basic import locate_frame, locate_frame_legacy
+        from screen_airdrop.receiver.locator_basic import (
+            locate_frame,
+            locate_frame_legacy,
+        )
 
         if self._manual_mode:
             # Manual mode: use lightweight locator
@@ -209,17 +215,14 @@ class ScreenLiveRuntime:
             def auto_locator_with_fallback(
                 frame,
                 search_roi,
-                grid_w,
-                grid_h,
-                guard_band,
-                corner_size,
+                config=None,
             ):
                 # Try precise locator first
-                result = locate_frame(frame, search_roi, grid_w, grid_h, guard_band, corner_size)
+                result = locate_frame(frame, search_roi, config)
 
                 # Fallback to lightweight if failed or low confidence
                 if isinstance(result, LocateError) or result.quality.confidence < 0.55:
-                    return locate_frame_legacy(frame, search_roi, grid_w, grid_h, guard_band, corner_size)
+                    return locate_frame_legacy(frame, search_roi, config)
 
                 return result
 
@@ -266,6 +269,12 @@ class ScreenLiveRuntime:
         self._shutdown_complete = False
 
     def start(self) -> None:
+        # Initialize report_collector now that assembler is available
+        self.report_collector = self._create_report_collector(
+            stats=self.stats,
+            assembler=self._assembler,
+        )
+
         self._start_processes()
         self._prime_grab_slots()
         self._coord_thread.start()
@@ -292,6 +301,14 @@ class ScreenLiveRuntime:
     def check_errors(self) -> None:
         if self.error is not None:
             raise RuntimeError(str(self.error)) from self.error
+
+    def snapshot(self) -> Dict[str, Any]:
+        """获取 pipeline 统计快照（实现 BasePipeline 接口）。
+
+        Returns:
+            统一格式的统计字典
+        """
+        return self.stats.snapshot()
 
     def _start_processes(self) -> None:
         self._grab_thread = threading.Thread(
@@ -382,6 +399,10 @@ class ScreenLiveRuntime:
             ProcessPrepStrategy,
         )
 
+        # Ensure report_collector is initialized (should be done in start())
+        if self.report_collector is None:
+            raise RuntimeError("report_collector not initialized - call start() first")
+
         # Create prep strategy based on mode
         if self._prep_processes > 0:
             prep_strategy = ProcessPrepStrategy(
@@ -399,6 +420,7 @@ class ScreenLiveRuntime:
             geometry_tracker=self._geometry_tracker,
             stats=self.stats,
             assembler=self._assembler,
+            report_collector=self.report_collector,
             prep_strategy=prep_strategy,
             grab_slot_queue=self._grab_slot_queue,
             grab_event_queue=self._grab_event_queue,
@@ -437,89 +459,17 @@ class ScreenLiveRuntime:
             fingerprint_ms=(t1 - t0) * 1000.0,
         )
 
-    def _accept_decoded_chunk(self, completion: DecodeCompletion, decoded_ts: float) -> None:
-        if completion.frame_type == FRAME_DATA:
-            control_kind = control_kind_from_wire_chunk_id(completion.chunk_id)
-            if control_kind is not None:
-                with self.stats._lock:
-                    if self.stats.first_new_chunk_ts is None:
-                        self.stats.startup_control_frames_decoded += 1
-                try:
-                    self._assembler.add_control(control_kind, completion.payload)
-                except Exception:
-                    pass
-            elif completion.chunk_id > 0:
-                is_new_chunk = completion.chunk_id not in self._assembler.chunks
-                self._assembler.add(completion.chunk_id, completion.payload)
-                with self.stats._lock:
-                    if is_new_chunk:
-                        self.stats.decoded_new_chunks += 1
-                        self.stats.assembled += 1
-                        self.stats.assembled_bytes += len(completion.payload)
-                        if self.stats.first_new_chunk_ts is None:
-                            self.stats.first_new_chunk_ts = decoded_ts
-                    else:
-                        self.stats.decoded_duplicate_chunks += 1
-        else:
-            with self.stats._lock:
-                if self.stats.first_new_chunk_ts is None:
-                    self.stats.startup_sync_frames_decoded += 1
-        if self._on_frame_callback is not None:
-            try:
-                self._on_frame_callback(
-                    SimpleNamespace(
-                        chunk_id=completion.chunk_id,
-                        payload=completion.payload,
-                        frame_id=completion.frame_id,
-                        frame_type=completion.frame_type,
-                        meta=completion.meta,
-                        decoded_ts=decoded_ts,
-                    )
-                )
-            except Exception:
-                pass
-
-    def _signal_control_sentinels(self) -> None:
-        for q in (
-            self._grab_slot_queue,
-            self._grab_event_queue,
-            self._prep_input_queue,
-            self._prep_output_queue,
-            *self._decode_assignment_queues,
-            self._decode_result_queue,
-            self._dump_queue,
-            self._dump_event_queue,
-        ):
-            if q is None:
-                continue
-            try:
-                q.put(None)
-            except Exception:
-                pass
-
-    def _check_process_health(self) -> None:
-        if self._grab_thread is not None and not self._grab_thread.is_alive() and not self._stop_event.is_set():
-            self._slot_registry.reclaim_writer_owner(_GRAB_OWNER)
-            self.error = RuntimeError("grab thread exited unexpectedly")
-            self._stop_event.set()
-        if self._prep_process is not None and not self._prep_process.is_alive() and self._prep_process.exitcode not in (0, None):
-            self.error = RuntimeError(f"prep process exited with code {self._prep_process.exitcode}")
-            self._stop_event.set()
-        for idx, proc in enumerate(self._decode_processes):
-            if not proc.is_alive() and proc.exitcode not in (0, None):
-                self._slot_registry.reclaim_decode_owner(idx)
-                self.error = RuntimeError(f"decode worker {idx} exited with code {proc.exitcode}")
-                self._stop_event.set()
-        if self._dump_process is not None and not self._dump_process.is_alive() and self._dump_process.exitcode not in (0, None):
-            self._slot_registry.reclaim_dump_reader()
-
     def _shutdown_processes(self) -> None:
         with self._shutdown_lock:
             if self._shutdown_complete:
                 return
             self._shutdown_complete = True
 
-            # First, send stop signals to all queues to unblock workers
+            # Phase 1: Stop grab thread first (stop new data production)
+            if self._grab_thread is not None and self._grab_thread.is_alive():
+                self._grab_thread.join(timeout=1.0)
+
+            # Phase 2: Send sentinel values to unblock all workers
             for q in [
                 self._prep_input_queue,
                 self._prep_output_queue,
@@ -533,18 +483,7 @@ class ScreenLiveRuntime:
                     except Exception:
                         pass
 
-            # Give processes a brief moment to exit gracefully
-            import time
-            time.sleep(0.05)
-
-            # Terminate processes that are still alive
-            for proc in [self._prep_process, *self._decode_processes, self._dump_process]:
-                if proc is None:
-                    continue
-                if proc.is_alive():
-                    proc.terminate()
-
-            # Wait for all processes to actually exit using sentinels
+            # Phase 3: Wait for graceful exit (give workers time to see sentinels)
             import multiprocessing.connection
             sentinels = []
             for proc in [self._prep_process, *self._decode_processes, self._dump_process]:
@@ -552,14 +491,21 @@ class ScreenLiveRuntime:
                     sentinels.append(proc.sentinel)
 
             if sentinels:
-                # Wait for all sentinels with timeout
+                # Wait up to 2 seconds for graceful exit
+                multiprocessing.connection.wait(sentinels, timeout=2.0)
+
+            # Phase 4: Terminate any remaining processes
+            for proc in [self._prep_process, *self._decode_processes, self._dump_process]:
+                if proc is None:
+                    continue
+                if proc.is_alive():
+                    proc.terminate()
+
+            # Phase 5: Final wait for termination to complete
+            if sentinels:
                 multiprocessing.connection.wait(sentinels, timeout=1.0)
 
-            # Join grab thread
-            if self._grab_thread is not None:
-                self._grab_thread.join(timeout=0.5)
-
-            # Close all processes
+            # Phase 6: Close all process handles
             for proc in [self._prep_process, *self._decode_processes, self._dump_process]:
                 if proc is None:
                     continue
@@ -568,7 +514,7 @@ class ScreenLiveRuntime:
                 except Exception:
                     pass
 
-            # Close all queues
+            # Phase 7: Close all queues
             for q in [
                 self._grab_slot_queue,
                 self._grab_event_queue,
@@ -581,7 +527,7 @@ class ScreenLiveRuntime:
             ]:
                 _close_queue(q)
 
-            # Close and unlink shared memory
+            # Phase 8: Close and unlink shared memory
             for shm in self._slots:
                 try:
                     shm.close()
@@ -592,14 +538,3 @@ class ScreenLiveRuntime:
                 except Exception:
                     pass
 
-    def _classify_failure(self, decode_error: str) -> str:
-        raw = str(decode_error).strip().lower()
-        if not raw:
-            return ""
-        if "payload rs decode failed" in raw or "payload crc mismatch" in raw or "crc mismatch" in raw:
-            return "payload"
-        if "header rs decode failed" in raw or "bad v3 magic" in raw or "format parity mismatch" in raw or "bootstrap" in raw:
-            return "header"
-        if "locator" in raw or "no_finder" in raw or "finder" in raw:
-            return "locator"
-        return "unknown"

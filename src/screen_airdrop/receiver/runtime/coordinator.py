@@ -5,6 +5,7 @@ import threading
 from typing import Any, List, Optional
 
 from screen_airdrop.receiver.assembler import ChunkAssembler
+from screen_airdrop.receiver.reporting import ReportCollector
 from screen_airdrop.receiver.runtime.events import (
     DecodeAssignment,
     DecodeCompletion,
@@ -31,6 +32,7 @@ class RuntimeCoordinator:
         geometry_tracker: GeometryTracker,
         stats: ScreenLiveRuntimeStats,
         assembler: ChunkAssembler,
+        report_collector: ReportCollector,
         prep_strategy: PrepStrategy,
         grab_slot_queue: Any,
         grab_event_queue: Any,
@@ -50,6 +52,7 @@ class RuntimeCoordinator:
             geometry_tracker: Geometry state tracker
             stats: Runtime statistics
             assembler: Chunk assembler
+            report_collector: ReportCollector for new architecture
             prep_strategy: Prep processing strategy (async or process)
             grab_slot_queue: Queue for slot assignments to grab worker
             grab_event_queue: Queue for filled slot events from grab worker
@@ -66,6 +69,7 @@ class RuntimeCoordinator:
         self._geometry_tracker = geometry_tracker
         self._stats = stats
         self._assembler = assembler
+        self._report_collector = report_collector
         self._prep_strategy = prep_strategy
         self._grab_slot_queue = grab_slot_queue
         self._grab_event_queue = grab_event_queue
@@ -108,15 +112,31 @@ class RuntimeCoordinator:
             tasks.append(asyncio.create_task(self._process_dump_events()))
 
         try:
-            # Wait for all tasks to complete
-            await asyncio.gather(*tasks)
+            # Wait for any task to complete (decode task will exit when assembly complete)
+            # Use return_when=FIRST_COMPLETED to exit as soon as decode task finishes
+            _, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+
+            # If decode task completed due to assembly complete, cancel all other tasks immediately
+            if self._stop_event.is_set():
+                for task in pending:
+                    task.cancel()
+                # Don't wait for cancellations - just let them be cancelled
+            else:
+                # Some other task completed unexpectedly, wait for all
+                await asyncio.gather(*tasks)
         finally:
-            # Cancel all tasks to ensure clean shutdown
+            # Cancel all remaining tasks to ensure clean shutdown
             for task in tasks:
                 if not task.done():
                     task.cancel()
-            # Wait for cancellations to complete with short timeout
-            await asyncio.gather(*tasks, return_exceptions=True)
+            # Wait for cancellations to complete
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*tasks, return_exceptions=True),
+                    timeout=1.0
+                )
+            except asyncio.TimeoutError:
+                pass  # Force exit even if tasks don't cancel quickly
             # Cleanup
             await self._prep_strategy.stop()
 
@@ -160,6 +180,26 @@ class RuntimeCoordinator:
             if self._assembler.complete():
                 # Assembly complete - stop everything immediately
                 self._stop_event.set()
+
+                # Send sentinel values to unblock all queue.get() calls
+                # This ensures other tasks exit quickly
+                try:
+                    self._grab_event_queue.put_nowait(None)
+                except Exception:
+                    pass
+
+                if self._prep_output_queue is not None:
+                    try:
+                        self._prep_output_queue.put_nowait(None)
+                    except Exception:
+                        pass
+
+                if self._dump_event_queue is not None:
+                    try:
+                        self._dump_event_queue.put_nowait(None)
+                    except Exception:
+                        pass
+
                 # Exit immediately - processes will be terminated in shutdown
                 break
 
@@ -181,6 +221,24 @@ class RuntimeCoordinator:
         if isinstance(event, dict) and event.get("kind") == "error":
             raise RuntimeError(f"grab process failed: {event.get('error', '')}")
 
+        # Handle slot starvation events
+        if isinstance(event, dict) and event.get("kind") == "grab_slot_starvation":
+            with self._stats._lock:
+                self._stats.slot_starvation_events += 1
+                self._stats.dropped_slot_starvation += 1
+            # Note: We don't force-release slots here to keep the implementation simple
+            # The grab thread will continue grabbing and updating raw_grab_frames
+            # This allows us to observe the true grab rate vs captured rate
+            return
+
+        # Handle raw grab stats (before slot assignment)
+        if isinstance(event, dict) and event.get("kind") == "raw_grab_stats":
+            with self._stats._lock:
+                self._stats.raw_grab_frames += 1
+                self._stats.capture_grab_time_ms += float(event.get("grab_ms", 0.0) or 0.0)
+                self._stats.capture_grab_ops += 1
+            return
+
         # Handle slot wait metrics
         if isinstance(event, dict) and event.get("kind") == "slot_wait_ms":
             with self._stats._lock:
@@ -199,11 +257,15 @@ class RuntimeCoordinator:
             return
 
         # Update stats
+        # - raw_grab_frames: total grabs (including starvation)
+        # - captured: successful slot assignments
         with self._stats._lock:
-            self._stats.captured += 1
-            self._stats.raw_grab_frames += 1
+            self._stats.raw_grab_frames += 1  # Count every grab
+            self._stats.captured += 1          # Count successful slot assignment
             self._stats.capture_grab_time_ms += float(event.grab_ms)
             self._stats.capture_grab_ops += 1
+            self._stats.capture_copy_time_ms += float(event.copy_ms)
+            self._stats.capture_copy_ops += 1
             self._stats.capture_overwrite_count = (
                 self._slot_manager.snapshot_overwrite_count()
             )
@@ -431,17 +493,23 @@ class RuntimeCoordinator:
 
     def _handle_decode_failure(self, completion: Any) -> None:
         """Handle decode failure."""
+        # Get error message
+        error = getattr(completion, "error", "unknown error")
+
+        # Extract failure_class from worker (DecodeError attributes)
+        failure_class = getattr(completion, "failure_class", "unknown")
+
         with self._stats._lock:
             self._stats.decode_fail += 1
-            self._stats.last_decode_error = completion.error
-            self._stats.last_failure_class = completion.failure_class
+            self._stats.last_decode_error = error
+            self._stats.last_failure_class = failure_class
 
             # Track failure by class
-            if completion.failure_class == "header":
+            if failure_class == "header":
                 self._stats.failure_count_header += 1
-            elif completion.failure_class == "payload":
+            elif failure_class == "payload":
                 self._stats.failure_count_payload += 1
-            elif completion.failure_class == "locator":
+            elif failure_class == "locator":
                 self._stats.failure_count_locator += 1
             else:
                 self._stats.failure_count_unknown += 1

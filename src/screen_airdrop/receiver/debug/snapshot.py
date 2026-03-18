@@ -237,7 +237,7 @@ class DebugSnapshotManager:
                 meta["decoded_plane"] = "data"
 
         # Apply v31 metadata
-        if v31_meta is not None:
+        if v31_meta is not None and isinstance(v31_meta, dict):
             self.metadata_builder.apply_v31_meta_to_debug(
                 meta=meta, v31_meta=v31_meta, protocol=protocol
             )

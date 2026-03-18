@@ -5,17 +5,15 @@ import queue
 import signal
 import threading
 import time
-from multiprocessing import resource_tracker, shared_memory
+from multiprocessing import shared_memory
 from types import SimpleNamespace
 from typing import Any, List, Optional, Protocol, Sequence, Tuple, cast
 
 import numpy as np
 
 from screen_airdrop.receiver.capture_mss import get_monitor_region
-from screen_airdrop.receiver.protocol_adapter_basic import BasicProtocolDecoder
-from screen_airdrop.receiver.protocol_adapter_compact import CompactProtocolDecoder
-from screen_airdrop.receiver.protocol_adapter_gray4 import Gray4ProtocolDecoder
-from screen_airdrop.receiver.protocol_adapter_layered import LayeredProtocolDecoder
+from screen_airdrop.receiver.decode_errors import DecodeError
+from screen_airdrop.receiver.protocol_decoder_factory import create_protocol_decoder
 from screen_airdrop.receiver.runtime.events import (
     DecodeAssignment,
     DecodeCompletion,
@@ -80,35 +78,28 @@ def _make_decoder(
     guard_band: int,
     corner_size: int,
 ) -> Any:
-    if protocol == "basic":
-        return BasicProtocolDecoder(
-            grid_w=grid_w,
-            grid_h=grid_h,
-            guard_band=guard_band,
-            corner_size=corner_size,
-        )
-    if protocol == "compact":
-        return CompactProtocolDecoder(
-            grid_w=grid_w,
-            grid_h=grid_h,
-            guard_band=guard_band,
-            corner_size=corner_size,
-        )
-    if protocol == "gray4":
-        return Gray4ProtocolDecoder(
-            grid_w=grid_w,
-            grid_h=grid_h,
-            guard_band=guard_band,
-            corner_size=corner_size,
-        )
-    if protocol == "layered":
-        return LayeredProtocolDecoder(
-            grid_w=grid_w,
-            grid_h=grid_h,
-            guard_band=guard_band,
-            corner_size=corner_size,
-        )
-    raise ValueError(f"Unknown protocol: {protocol}")
+    """Create protocol decoder instance.
+
+    Args:
+        protocol: Protocol name
+        grid_w: Grid width
+        grid_h: Grid height
+        guard_band: Guard band size
+        corner_size: Corner marker size
+
+    Returns:
+        Protocol decoder instance
+
+    Raises:
+        ValueError: If protocol is unknown
+    """
+    return create_protocol_decoder(
+        protocol=protocol,
+        grid_w=grid_w,
+        grid_h=grid_h,
+        guard_band=guard_band,
+        corner_size=corner_size,
+    )
 
 
 def _as_grid_bbox_std(value: Sequence[int]) -> Tuple[int, int, int, int]:
@@ -305,21 +296,59 @@ def _grab_thread_main(
         capture_index = 0
         with mss.mss() as sct:
             while not stop_event.is_set():
+                # Wait for slot assignment
                 wait_t0 = time.perf_counter()
                 try:
-                    item = slot_assign_queue.get(block=True, timeout=1.0)  # type: ignore[call-arg]
+                    # Use non-blocking get to check for slot immediately
+                    item = slot_assign_queue.get(block=False)
                 except queue.Empty:
+                    # No slot available right now
+                    # Check if we should grab anyway (to maintain raw_grab_fps)
+                    now = time.perf_counter()
+                    if now >= next_deadline:
+                        # Time to grab, even without slot
+                        try:
+                            t0 = time.perf_counter()
+                            shot = sct.grab(monitor)
+                            t1 = time.perf_counter()
+                            grab_ms = (t1 - t0) * 1000.0
+
+                            descriptor_queue.put({"kind": "grab_slot_starvation"})
+                            descriptor_queue.put({
+                                "kind": "raw_grab_stats",
+                                "grab_ms": grab_ms,
+                            })
+                        except Exception:
+                            pass
+
+                        # Update deadline
+                        next_deadline += frame_interval
+                        if now - next_deadline > frame_interval:
+                            next_deadline = now + frame_interval
+                    else:
+                        # Not time to grab yet, sleep a bit and retry
+                        time.sleep(0.001)
                     continue
+
                 if item is None:
                     break
+
                 slot_id, generation = cast(Tuple[int, int], item)
                 slot_wait_ms = (time.perf_counter() - wait_t0) * 1000.0
+
+                # Now we have a slot, grab the frame
                 try:
                     t0 = time.perf_counter()
                     shot = sct.grab(monitor)
                     t1 = time.perf_counter()
+                    grab_ms = (t1 - t0) * 1000.0
+
+                    # Copy to slot
                     bgra = np.asarray(shot)
                     slot_views[int(slot_id)][...] = bgra[:, :, :3]
+                    t2 = time.perf_counter()
+                    copy_ms = (t2 - t1) * 1000.0
+
                     event = FilledSlotEvent(
                         descriptor=FrameSlotDescriptor(
                             slot_id=int(slot_id),
@@ -333,13 +362,17 @@ def _grab_thread_main(
                             dump_requested=False,
                             slot_kind="capture",
                         ),
-                        grab_ms=(t1 - t0) * 1000.0,
+                        grab_ms=grab_ms,
+                        copy_ms=copy_ms,
                     )
                     descriptor_queue.put(event)
                     descriptor_queue.put({"kind": "slot_wait_ms", "value": slot_wait_ms})
                 except Exception as exc:
                     descriptor_queue.put({"kind": "error", "stage": "grab", "error": str(exc)})
+
                 capture_index += 1
+
+                # Sleep to maintain target FPS
                 if frame_interval > 0:
                     next_deadline += frame_interval
                     now = time.perf_counter()
@@ -441,13 +474,22 @@ def _decode_worker_main(
                     )
                 )
             except Exception as exc:
+                error_msg = str(exc)
+                # Extract failure_class and context from DecodeError if available
+                failure_class = "unknown"
+                context = None
+                if isinstance(exc, DecodeError):
+                    failure_class = exc.failure_class
+                    context = exc.context
+
                 result_queue.put(
                     DecodeCompletion(
                         descriptor=descriptor,
                         worker_id=worker_id,
                         success=False,
-                        error=str(exc),
-                        failure_class="",
+                        error=error_msg,
+                        failure_class=failure_class,
+                        context=context,
                         used_geometry_generation=int(assignment.geometry_generation),
                         decode_mode=decode_mode,
                         decode_attach_ms=(t_attach1 - t_attach0) * 1000.0,

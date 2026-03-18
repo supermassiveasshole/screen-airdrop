@@ -4,11 +4,11 @@ from typing import Callable, Optional, Tuple
 
 import numpy as np
 
-from screen_airdrop.receiver.locator_basic import LocateError, LocateResult
+from screen_airdrop.receiver.locator_basic import LocateError, LocateResult, LocatorConfig
 
-# 定位算法回调类型
+# 定位算法回调类型 (新签名：使用 LocatorConfig)
 LocatorFunc = Callable[
-    [np.ndarray, Optional[Tuple[int, int, int, int]], int, int, int, int],
+    [np.ndarray, Optional[Tuple[int, int, int, int]], Optional[LocatorConfig]],
     LocateResult | LocateError,
 ]
 
@@ -46,12 +46,19 @@ class FrameLocator:
         """
         self._locator_func = locator_func
         self._grid_w = grid_w
-        self._grid_h = grid_h
         self._guard_band = guard_band
         self._corner_size = corner_size
         self._initial_roi = initial_roi
         self._track_roi = initial_roi
         self._fixed_roi = fixed_roi
+
+        # Create LocatorConfig for this locator
+        self._config = LocatorConfig(
+            grid_w=grid_w,
+            grid_h=grid_h,
+            guard_band=guard_band,
+            corner_size=corner_size,
+        )
 
     def locate(self, frame: np.ndarray) -> LocateResult | LocateError:
         """Run locator with current ROI tracking state.
@@ -64,14 +71,7 @@ class FrameLocator:
         """
         search_roi = self._track_roi or self._initial_roi
 
-        return self._locator_func(
-            frame,
-            search_roi,
-            self._grid_w,
-            self._grid_h,
-            self._guard_band,
-            self._corner_size,
-        )
+        return self._locator_func(frame, search_roi, self._config)
 
     def update_roi_from_bbox(self, bbox: Tuple[int, int, int, int]) -> None:
         """Update tracking ROI from successful detection bbox.

@@ -76,6 +76,10 @@ class ScreenLiveRuntimeStats:
     slot_in_use_peak: int = 0
     slot_generation_mismatch: int = 0
 
+    # Slot starvation metrics (P1 optimization)
+    dropped_slot_starvation: int = 0  # Frames skipped due to slot pool full
+    slot_starvation_events: int = 0   # Number of slot starvation events
+
     # Startup timing
     first_valid_frame_ts: Optional[float] = None
     first_data_frame_ts: Optional[float] = None
@@ -158,16 +162,20 @@ class ScreenLiveRuntimeStats:
                 "accepted_for_decode_frames": self.accepted_for_decode_frames,
                 "decode_queue_depth": self.decode_queue_depth,
                 "prep_backlog_frames": self.prep_backlog_frames,
+                "prep_backlog": self.prep_backlog_frames,  # Alias for formatter compatibility
                 "capture_overwrite_count": self.capture_overwrite_count,
                 "capture_overwrite_before_prep": self.capture_overwrite_before_prep,
                 "dropped_raw_queue_full": 0,
                 "dropped_prep_queue_full": 0,
                 "dropped_dump_queue_full": self.dropped_dump_backpressure,
                 "shared_memory_bytes_peak": 0,
+                "dropped_slot_unavailable": self.dropped_slot_unavailable,
                 "pipeline_dropped_slot_unavailable": self.dropped_slot_unavailable,
                 "pipeline_dropped_dump_backpressure": self.dropped_dump_backpressure,
                 "pipeline_slot_in_use_peak": self.slot_in_use_peak,
                 "pipeline_slot_generation_mismatch": self.slot_generation_mismatch,
+                "dropped_slot_starvation": self.dropped_slot_starvation,
+                "slot_starvation_events": self.slot_starvation_events,
                 "pipeline_decode_attach_ms": self.ipc_recv_time_ms,
                 "pipeline_prep_mode": self.prep_mode,
                 "pipeline_prep_processes": self.prep_processes,
