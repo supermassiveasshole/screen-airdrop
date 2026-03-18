@@ -22,7 +22,6 @@ from screen_airdrop.receiver.runtime.workers import (
     _decode_worker_main,
     _dump_worker_main,
     _grab_process_main,
-    _grab_thread_main,
     _prep_process_main,
 )
 
@@ -41,7 +40,6 @@ __all__ = [
     "is_duplicate",
     "_attach_shared_memory_for_child",
     "_grab_process_main",
-    "_grab_thread_main",
     "_decode_worker_main",
     "_dump_worker_main",
     "_prep_process_main",

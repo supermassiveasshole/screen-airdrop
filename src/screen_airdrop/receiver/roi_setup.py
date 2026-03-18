@@ -83,7 +83,9 @@ def setup_roi(
         stats.mark_manual_select_attempt()
         selected = select_region(get_monitor_region(config.monitor_index))
         if selected is None:
-            raise RuntimeError("manual roi selection canceled")
+            import sys
+            print("\nROI selection canceled. Exiting.", file=sys.stderr)
+            sys.exit(0)
         forced_roi = ensure_roi_valid(selected)
         stats.mark_manual_roi(switched=False)
 

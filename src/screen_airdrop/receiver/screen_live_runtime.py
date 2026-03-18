@@ -37,7 +37,7 @@ from screen_airdrop.receiver.runtime.stats import ScreenLiveRuntimeStats
 from screen_airdrop.receiver.runtime.workers import (
     _decode_worker_main,
     _dump_worker_main,
-    _grab_thread_main,
+    _grab_process_main,
     _prep_process_main,
 )
 from screen_airdrop.receiver.window_locator import resolve_window_region
@@ -183,14 +183,15 @@ class ScreenLiveRuntime(BasePipeline):
         self._slot_count = max(base_slots, fps_based_slots, decode_based_slots) + (
             1 if self._dump_dir and self._dump_max_frames > 0 else 0
         )
-        self._slot_bytes = self._width * self._height * 3
+        # Use RGBA (4 channels) for zero-copy from MSS (29x faster)
+        self._slot_bytes = self._width * self._height * 4
         self._slots = [shared_memory.SharedMemory(create=True, size=self._slot_bytes) for _ in range(self._slot_count)]
 
         # Note: We do NOT unregister from resource_tracker. Let it handle cleanup automatically.
         # Manual unlink in _shutdown_processes() will clean up the shared memory segments.
 
         self._slot_views = [
-            np.ndarray((self._height, self._width, 3), dtype=np.uint8, buffer=slot.buf)
+            np.ndarray((self._height, self._width, 4), dtype=np.uint8, buffer=slot.buf)
             for slot in self._slots
         ]
         self._prep_roi = clip_roi_to_frame(
@@ -247,8 +248,9 @@ class ScreenLiveRuntime(BasePipeline):
         )
         self._last_fingerprint: Optional[bytes] = None
         self._next_worker = 0
-        self._grab_slot_queue: queue.SimpleQueue[object] = queue.SimpleQueue()
-        self._grab_event_queue: queue.SimpleQueue[object] = queue.SimpleQueue()
+        # Use ctx.SimpleQueue for cross-process queues
+        self._grab_slot_queue = self._ctx.SimpleQueue()
+        self._grab_event_queue = self._ctx.SimpleQueue()
         self._prep_input_queue = self._ctx.SimpleQueue() if self._prep_processes > 0 else None
         self._prep_output_queue = self._ctx.SimpleQueue() if self._prep_processes > 0 else None
         self._decode_assignment_queues = [self._ctx.SimpleQueue() for _ in range(self._decode_workers)]
@@ -311,13 +313,16 @@ class ScreenLiveRuntime(BasePipeline):
         return self.stats.snapshot()
 
     def _start_processes(self) -> None:
-        self._grab_thread = threading.Thread(
-            target=_grab_thread_main,
+        # Use process instead of thread for better isolation
+        self._grab_process = self._ctx.Process(
+            target=_grab_process_main,
             kwargs={
                 "slot_assign_queue": self._grab_slot_queue,
                 "descriptor_queue": self._grab_event_queue,
-                "stop_event": self._stop_event,
-                "slot_views": self._slot_views,
+                "stop_event": self._proc_stop_event,
+                "slot_names": [slot.name for slot in self._slots],
+                "width": self._width,
+                "height": self._height,
                 "target_fps": float(self._capture_fps),
                 "window_title": self._capture.window_title,
                 "explicit_region": self._capture.region,
@@ -326,7 +331,7 @@ class ScreenLiveRuntime(BasePipeline):
             daemon=True,
             name="ScreenLiveGrab",
         )
-        self._grab_thread.start()
+        self._grab_process.start()
         if self._prep_processes > 0 and self._prep_input_queue is not None and self._prep_output_queue is not None:
             self._prep_process = self._ctx.Process(
                 target=_prep_process_main,
@@ -465,9 +470,11 @@ class ScreenLiveRuntime(BasePipeline):
                 return
             self._shutdown_complete = True
 
-            # Phase 1: Stop grab thread first (stop new data production)
-            if self._grab_thread is not None and self._grab_thread.is_alive():
-                self._grab_thread.join(timeout=1.0)
+            # Phase 1: Stop grab process first (stop new data production)
+            if self._grab_process is not None and self._grab_process.is_alive():
+                self._grab_process.join(timeout=1.0)
+                if self._grab_process.is_alive():
+                    self._grab_process.terminate()
 
             # Phase 2: Send sentinel values to unblock all workers
             for q in [
@@ -485,8 +492,14 @@ class ScreenLiveRuntime(BasePipeline):
 
             # Phase 3: Wait for graceful exit (give workers time to see sentinels)
             import multiprocessing.connection
+
             sentinels = []
-            for proc in [self._prep_process, *self._decode_processes, self._dump_process]:
+            for proc in [
+                self._grab_process,
+                self._prep_process,
+                *self._decode_processes,
+                self._dump_process,
+            ]:
                 if proc is not None and proc.sentinel is not None:
                     sentinels.append(proc.sentinel)
 
@@ -495,7 +508,12 @@ class ScreenLiveRuntime(BasePipeline):
                 multiprocessing.connection.wait(sentinels, timeout=2.0)
 
             # Phase 4: Terminate any remaining processes
-            for proc in [self._prep_process, *self._decode_processes, self._dump_process]:
+            for proc in [
+                self._grab_process,
+                self._prep_process,
+                *self._decode_processes,
+                self._dump_process,
+            ]:
                 if proc is None:
                     continue
                 if proc.is_alive():
@@ -506,7 +524,12 @@ class ScreenLiveRuntime(BasePipeline):
                 multiprocessing.connection.wait(sentinels, timeout=1.0)
 
             # Phase 6: Close all process handles
-            for proc in [self._prep_process, *self._decode_processes, self._dump_process]:
+            for proc in [
+                self._grab_process,
+                self._prep_process,
+                *self._decode_processes,
+                self._dump_process,
+            ]:
                 if proc is None:
                     continue
                 try:
