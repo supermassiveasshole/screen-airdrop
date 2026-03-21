@@ -2,7 +2,7 @@
 
 import asyncio
 import multiprocessing as mp
-import queue
+import os
 import threading
 import time
 from multiprocessing import shared_memory
@@ -14,7 +14,6 @@ import numpy as np
 from screen_airdrop.common.protocol_basic import DEFAULT_GRID_H, DEFAULT_GRID_W
 from screen_airdrop.receiver.assembler import ChunkAssembler
 from screen_airdrop.receiver.capture_mss import get_monitor_region
-from screen_airdrop.receiver.locator_basic import LocateError
 from screen_airdrop.receiver.protocol_observability import make_protocol_report_adapter
 from screen_airdrop.receiver.runtime.base_pipeline import BasePipeline
 from screen_airdrop.receiver.runtime.events import (
@@ -35,10 +34,10 @@ from screen_airdrop.receiver.runtime.geometry_tracker import GeometryState, Geom
 from screen_airdrop.receiver.runtime.slot_manager import SlotManager
 from screen_airdrop.receiver.runtime.stats import ScreenLiveRuntimeStats
 from screen_airdrop.receiver.runtime.workers import (
-    _decode_worker_main,
-    _dump_worker_main,
-    _grab_process_main,
-    _prep_process_main,
+    decode_worker_main,
+    dump_worker_main,
+    grab_process_main,
+    prep_process_main,
 )
 from screen_airdrop.receiver.window_locator import resolve_window_region
 
@@ -83,8 +82,9 @@ _GRAB_OWNER = "grab"
 class ProtocolReportAdapterProtocol(Protocol):
     def finalize_summary(self) -> Mapping[str, object]: ...
     def accumulate_success(self, meta: object) -> None: ...
-    def accumulate_failure(self, error: str, *, failure_class: str, trace: Optional[Mapping[str, object]]) -> None: ...
-
+    def accumulate_failure(
+        self, error: str, *, failure_class: str, trace: Optional[Mapping[str, object]]
+    ) -> None: ...
 
 
 def _close_queue(q: object) -> None:
@@ -105,6 +105,43 @@ def _close_queue(q: object) -> None:
             cast(Any, q).join_thread()
         except Exception:
             pass
+
+
+def _put_queue_sentinel(q: object) -> None:
+    """Best-effort enqueue of a shutdown sentinel."""
+    if q is None:
+        return
+    if hasattr(q, "put_nowait"):
+        try:
+            cast(Any, q).put_nowait(None)
+            return
+        except Exception:
+            pass
+    if hasattr(q, "put"):
+        try:
+            cast(Any, q).put(None)
+        except Exception:
+            pass
+
+
+def _process_still_alive(proc: BaseProcess) -> bool:
+    """Best-effort liveness check that tolerates half-closed process handles."""
+    try:
+        return proc.is_alive()
+    except Exception:
+        return False
+
+
+def _unexpected_process_exit(proc: Optional[BaseProcess]) -> Optional[int]:
+    """Return unexpected exit code for a live-runtime worker, if any."""
+    if proc is None:
+        return None
+    try:
+        if proc.exitcode is None:
+            return None
+        return int(proc.exitcode)
+    except Exception:
+        return None
 
 
 class ScreenLiveRuntime(BasePipeline):
@@ -161,7 +198,9 @@ class ScreenLiveRuntime(BasePipeline):
         self.done_event = threading.Event()
         self.error: Optional[Exception] = None
         self.stats = ScreenLiveRuntimeStats(protocol=protocol)
-        self.stats.protocol_report_adapter = cast(ProtocolReportAdapterProtocol, make_protocol_report_adapter(protocol))
+        self.stats.protocol_report_adapter = cast(
+            ProtocolReportAdapterProtocol, make_protocol_report_adapter(protocol)
+        )
         self.stats.prep_mode = "process" if self._prep_processes > 0 else "async"
         self.stats.prep_processes = self._prep_processes
         monitor_region = get_monitor_region(int(self._capture.monitor_index))
@@ -171,6 +210,19 @@ class ScreenLiveRuntime(BasePipeline):
             monitor_region=monitor_region,
         )
         self._capture.active_region = (x, y, w, h)
+        if os.getenv("SCREEN_AIRDROP_RUNTIME_DEBUG", "").lower() not in ("", "0", "false", "no"):
+            import sys
+            import time
+
+            print(
+                "[runtime-debug "
+                f"pid={os.getpid()} stage=runtime_region t={time.time():.3f}] "
+                f"capture_region={self._capture.region} "
+                f"active_region={self._capture.active_region} "
+                f"monitor_region={monitor_region}",
+                file=sys.stderr,
+                flush=True,
+            )
         self._width = int(w)
         self._height = int(h)
         # Slot count calculation:
@@ -185,7 +237,10 @@ class ScreenLiveRuntime(BasePipeline):
         )
         # Use RGBA (4 channels) for zero-copy from MSS (29x faster)
         self._slot_bytes = self._width * self._height * 4
-        self._slots = [shared_memory.SharedMemory(create=True, size=self._slot_bytes) for _ in range(self._slot_count)]
+        self._slots = [
+            shared_memory.SharedMemory(create=True, size=self._slot_bytes)
+            for _ in range(self._slot_count)
+        ]
 
         # Note: We do NOT unregister from resource_tracker. Let it handle cleanup automatically.
         # Manual unlink in _shutdown_processes() will clean up the shared memory segments.
@@ -202,49 +257,25 @@ class ScreenLiveRuntime(BasePipeline):
         self._slot_registry = SlotManager([slot.name for slot in self._slots])
 
         # Create locator function based on mode
-        from screen_airdrop.receiver.frame_locator import FrameLocator
-        from screen_airdrop.receiver.locator_basic import (
-            locate_frame,
-            locate_frame_legacy,
-        )
+        from screen_airdrop.receiver.locator import build_frame_locator
 
-        if self._manual_mode:
-            # Manual mode: use lightweight locator
-            locator_func = locate_frame_legacy
-        else:
-            # Auto mode: use precise locator with fallback
-            def auto_locator_with_fallback(
-                frame,
-                search_roi,
-                config=None,
-            ):
-                # Try precise locator first
-                result = locate_frame(frame, search_roi, config)
-
-                # Fallback to lightweight if failed or low confidence
-                if isinstance(result, LocateError) or result.quality.confidence < 0.55:
-                    return locate_frame_legacy(frame, search_roi, config)
-
-                return result
-
-            locator_func = auto_locator_with_fallback
-
-        # Create FrameLocator
-        locator = FrameLocator(
-            locator_func=locator_func,
+        self._stream_id = "screen:0"
+        locator = build_frame_locator(
             grid_w=self._grid_w,
             grid_h=self._grid_h,
             guard_band=self._guard_band,
             corner_size=self._corner_size,
             initial_roi=self._initial_search_roi,
-            fixed_roi=self._manual_mode,
+            manual_mode=self._manual_mode,
         )
 
         # Create GeometryTracker with integrated locator
         self._geometry_tracker = GeometryTracker(
             locator=locator,
+            stream_id=self._stream_id,
+            search_policy="roi_only" if self._manual_mode else "roi_then_expand",
+            fixed_roi=self._initial_search_roi if self._manual_mode else None,
             locator_confidence_threshold=0.55,
-            lock_fail_reacquire_threshold=5,
         )
         self._last_fingerprint: Optional[bytes] = None
         self._next_worker = 0
@@ -253,9 +284,13 @@ class ScreenLiveRuntime(BasePipeline):
         self._grab_event_queue = self._ctx.SimpleQueue()
         self._prep_input_queue = self._ctx.SimpleQueue() if self._prep_processes > 0 else None
         self._prep_output_queue = self._ctx.SimpleQueue() if self._prep_processes > 0 else None
-        self._decode_assignment_queues = [self._ctx.SimpleQueue() for _ in range(self._decode_workers)]
+        self._decode_assignment_queues = [
+            self._ctx.SimpleQueue() for _ in range(self._decode_workers)
+        ]
         self._decode_result_queue = self._ctx.SimpleQueue()
-        self._dump_queue = self._ctx.SimpleQueue() if self._dump_dir and self._dump_max_frames > 0 else None
+        self._dump_queue = (
+            self._ctx.SimpleQueue() if self._dump_dir and self._dump_max_frames > 0 else None
+        )
         self._dump_event_queue = self._ctx.SimpleQueue() if self._dump_queue is not None else None
         self._proc_stop_event = self._ctx.Event()
         self._grab_process: Optional[BaseProcess] = None
@@ -263,8 +298,9 @@ class ScreenLiveRuntime(BasePipeline):
         self._prep_process: Optional[BaseProcess] = None
         self._decode_processes: List[BaseProcess] = []
         self._dump_process: Optional[BaseProcess] = None
-        self._coord_thread = threading.Thread(target=self._run_coordinator, name="ScreenLiveCoordinator", daemon=False)
-        self._stream_id = "screen:0"
+        self._coord_thread = threading.Thread(
+            target=self._run_coordinator, name="ScreenLiveCoordinator", daemon=False
+        )
         self._prep_async_queue: Optional[asyncio.Queue[FilledSlotEvent | None]] = None
         self._coord_async_queue: Optional[asyncio.Queue[Tuple[str, object]]] = None
         self._shutdown_lock = threading.Lock()
@@ -284,13 +320,7 @@ class ScreenLiveRuntime(BasePipeline):
     def stop(self) -> None:
         self._stop_event.set()
         self._proc_stop_event.set()
-        # Send sentinel values to unblock queue.get() calls in asyncio.to_thread
-        for q in [self._grab_event_queue, self._prep_output_queue, self._decode_result_queue, self._dump_event_queue]:
-            if q is not None:
-                try:
-                    q.put_nowait(None)
-                except Exception:
-                    pass
+        self._signal_shutdown_queues()
 
     def join(self, timeout: float = 10.0) -> None:
         self.stop()
@@ -304,18 +334,42 @@ class ScreenLiveRuntime(BasePipeline):
         if self.error is not None:
             raise RuntimeError(str(self.error)) from self.error
 
+        if self._stop_event.is_set():
+            return
+
+        grab_exit = _unexpected_process_exit(self._grab_process)
+        if grab_exit is not None:
+            raise RuntimeError(f"grab process exited unexpectedly with code {grab_exit}")
+
+        prep_exit = _unexpected_process_exit(self._prep_process)
+        if prep_exit is not None:
+            raise RuntimeError(f"prep process exited unexpectedly with code {prep_exit}")
+
+        for idx, proc in enumerate(self._decode_processes):
+            decode_exit = _unexpected_process_exit(proc)
+            if decode_exit is not None:
+                raise RuntimeError(
+                    f"decode worker {idx} exited unexpectedly with code {decode_exit}"
+                )
+
+        dump_exit = _unexpected_process_exit(self._dump_process)
+        if dump_exit is not None:
+            raise RuntimeError(f"dump process exited unexpectedly with code {dump_exit}")
+
     def snapshot(self) -> Dict[str, Any]:
         """获取 pipeline 统计快照（实现 BasePipeline 接口）。
 
         Returns:
             统一格式的统计字典
         """
-        return self.stats.snapshot()
+        snap = self.stats.snapshot()
+        snap.update(self._geometry_tracker.snapshot().as_dict())
+        return snap
 
     def _start_processes(self) -> None:
         # Use process instead of thread for better isolation
         self._grab_process = self._ctx.Process(
-            target=_grab_process_main,
+            target=grab_process_main,
             kwargs={
                 "slot_assign_queue": self._grab_slot_queue,
                 "descriptor_queue": self._grab_event_queue,
@@ -328,34 +382,36 @@ class ScreenLiveRuntime(BasePipeline):
                 "explicit_region": self._capture.region,
                 "monitor_index": int(self._capture.monitor_index),
             },
-            daemon=True,
+            daemon=False,
             name="ScreenLiveGrab",
         )
         self._grab_process.start()
-        if self._prep_processes > 0 and self._prep_input_queue is not None and self._prep_output_queue is not None:
+        if (
+            self._prep_processes > 0
+            and self._prep_input_queue is not None
+            and self._prep_output_queue is not None
+        ):
             self._prep_process = self._ctx.Process(
-                target=_prep_process_main,
+                target=prep_process_main,
                 kwargs={
                     "prep_input_queue": self._prep_input_queue,
                     "prep_output_queue": self._prep_output_queue,
-                    "stop_event": self._proc_stop_event,
                     "slot_names": [slot.name for slot in self._slots],
                     "width": self._width,
                     "height": self._height,
                     "prep_roi": self._prep_roi,
                 },
-                daemon=True,
+                daemon=False,
                 name="ScreenLivePrep",
             )
             self._prep_process.start()
         for worker_id in range(self._decode_workers):
             proc = self._ctx.Process(
-                target=_decode_worker_main,
+                target=decode_worker_main,
                 kwargs={
                     "worker_id": worker_id,
                     "assignment_queue": self._decode_assignment_queues[worker_id],
                     "result_queue": self._decode_result_queue,
-                    "stop_event": self._proc_stop_event,
                     "slot_names": [slot.name for slot in self._slots],
                     "width": self._width,
                     "height": self._height,
@@ -365,24 +421,23 @@ class ScreenLiveRuntime(BasePipeline):
                     "guard_band": self._guard_band,
                     "corner_size": self._corner_size,
                 },
-                daemon=True,
+                daemon=False,
                 name=f"ScreenLiveDecode-{worker_id}",
             )
             proc.start()
             self._decode_processes.append(proc)
         if self._dump_queue is not None and self._dump_event_queue is not None and self._dump_dir:
             self._dump_process = self._ctx.Process(
-                target=_dump_worker_main,
+                target=dump_worker_main,
                 kwargs={
                     "dump_queue": self._dump_queue,
                     "dump_event_queue": self._dump_event_queue,
-                    "stop_event": self._proc_stop_event,
                     "slot_names": [slot.name for slot in self._slots],
                     "width": self._width,
                     "height": self._height,
                     "dump_dir": self._dump_dir,
                 },
-                daemon=True,
+                daemon=False,
                 name="ScreenLiveDump",
             )
             self._dump_process.start()
@@ -410,9 +465,7 @@ class ScreenLiveRuntime(BasePipeline):
 
         # Create prep strategy based on mode
         if self._prep_processes > 0:
-            prep_strategy = ProcessPrepStrategy(
-                self._prep_input_queue, self._prep_output_queue
-            )
+            prep_strategy = ProcessPrepStrategy(self._prep_input_queue, self._prep_output_queue)
         else:
             prep_strategy = AsyncPrepStrategy(
                 slot_views=self._slot_views,
@@ -464,42 +517,41 @@ class ScreenLiveRuntime(BasePipeline):
             fingerprint_ms=(t1 - t0) * 1000.0,
         )
 
+    def _signal_shutdown_queues(self) -> None:
+        """Unblock all queue readers so Ctrl+C can drain the runtime cleanly."""
+        for q in [
+            self._grab_slot_queue,
+            self._grab_event_queue,
+            self._prep_input_queue,
+            self._prep_output_queue,
+            *self._decode_assignment_queues,
+            self._decode_result_queue,
+            self._dump_queue,
+            self._dump_event_queue,
+        ]:
+            _put_queue_sentinel(q)
+
     def _shutdown_processes(self) -> None:
         with self._shutdown_lock:
             if self._shutdown_complete:
                 return
             self._shutdown_complete = True
 
-            # Phase 1: Stop grab process first (stop new data production)
-            if self._grab_process is not None and self._grab_process.is_alive():
-                self._grab_process.join(timeout=1.0)
-                if self._grab_process.is_alive():
-                    self._grab_process.terminate()
+            self._stop_event.set()
+            self._proc_stop_event.set()
+            self._signal_shutdown_queues()
 
-            # Phase 2: Send sentinel values to unblock all workers
-            for q in [
-                self._prep_input_queue,
-                self._prep_output_queue,
-                *self._decode_assignment_queues,
-                self._decode_result_queue,
-                self._dump_queue,
-            ]:
-                if q is not None:
-                    try:
-                        q.put_nowait(None)
-                    except Exception:
-                        pass
-
-            # Phase 3: Wait for graceful exit (give workers time to see sentinels)
+            # Phase 1: Wait for graceful exit after all readers are unblocked
             import multiprocessing.connection
 
-            sentinels = []
-            for proc in [
+            procs = [
                 self._grab_process,
                 self._prep_process,
                 *self._decode_processes,
                 self._dump_process,
-            ]:
+            ]
+            sentinels = []
+            for proc in procs:
                 if proc is not None and proc.sentinel is not None:
                     sentinels.append(proc.sentinel)
 
@@ -507,29 +559,49 @@ class ScreenLiveRuntime(BasePipeline):
                 # Wait up to 2 seconds for graceful exit
                 multiprocessing.connection.wait(sentinels, timeout=2.0)
 
-            # Phase 4: Terminate any remaining processes
-            for proc in [
-                self._grab_process,
-                self._prep_process,
-                *self._decode_processes,
-                self._dump_process,
-            ]:
+            # Phase 2: Terminate any remaining processes
+            for proc in procs:
                 if proc is None:
                     continue
-                if proc.is_alive():
+                if _process_still_alive(proc):
                     proc.terminate()
 
-            # Phase 5: Final wait for termination to complete
+            # Phase 3: Final wait for termination to complete
             if sentinels:
                 multiprocessing.connection.wait(sentinels, timeout=1.0)
 
-            # Phase 6: Close all process handles
-            for proc in [
-                self._grab_process,
-                self._prep_process,
-                *self._decode_processes,
-                self._dump_process,
-            ]:
+            # Phase 3.5: Escalate to SIGKILL for stubborn children.
+            for proc in procs:
+                if proc is None:
+                    continue
+                if not _process_still_alive(proc):
+                    continue
+                kill = getattr(proc, "kill", None)
+                if callable(kill):
+                    try:
+                        kill()
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
+
+            if sentinels:
+                multiprocessing.connection.wait(sentinels, timeout=1.0)
+
+            # Phase 4: Reap processes explicitly before closing handles.
+            for proc in procs:
+                if proc is None:
+                    continue
+                try:
+                    proc.join(timeout=1.0)
+                except Exception:
+                    pass
+
+            # Phase 5: Close all process handles
+            for proc in procs:
                 if proc is None:
                     continue
                 try:
@@ -537,7 +609,7 @@ class ScreenLiveRuntime(BasePipeline):
                 except Exception:
                     pass
 
-            # Phase 7: Close all queues
+            # Phase 6: Close all queues
             for q in [
                 self._grab_slot_queue,
                 self._grab_event_queue,
@@ -550,7 +622,7 @@ class ScreenLiveRuntime(BasePipeline):
             ]:
                 _close_queue(q)
 
-            # Phase 8: Close and unlink shared memory
+            # Phase 7: Close and unlink shared memory
             for shm in self._slots:
                 try:
                     shm.close()
@@ -560,4 +632,3 @@ class ScreenLiveRuntime(BasePipeline):
                     shm.unlink()
                 except Exception:
                     pass
-

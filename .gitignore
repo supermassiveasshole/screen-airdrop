@@ -6,16 +6,23 @@ dist/
 wheels/
 *.egg-info
 
+# Hidden local files and directories by default
+.*
+!.github/
+!.github/**
+!.gitignore
+!.python-version
+
 # Virtual environments
-.venv
+.venv/
+venv/
 
 # Local runtime artifacts
 /debug/
 recovered/
 
-# macOS finder metadata
-.DS_Store
-
-# vibe coding
-.claude/
-.codex/
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/

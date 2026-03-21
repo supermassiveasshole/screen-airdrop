@@ -15,8 +15,10 @@ class RSEccProfile:
     nsym: int
 
 
-LAYERED_BOOTSTRAP_RS = RSEccProfile(profile_id=2, nsym=16)
-LAYERED_BODY_RS = RSEccProfile(profile_id=1, nsym=16)
+LAYERED_BOOTSTRAP_RS = RSEccProfile(profile_id=2, nsym=15)
+LAYERED_BODY_RS_DENSE = RSEccProfile(profile_id=3, nsym=8)
+LAYERED_BODY_RS_ROBUST = RSEccProfile(profile_id=4, nsym=16)
+LAYERED_BODY_RS = LAYERED_BODY_RS_DENSE
 
 
 def rs_max_data_bytes(profile: RSEccProfile) -> int:
@@ -96,6 +98,8 @@ def decode_rs_bytes_with_erasures(
 __all__ = [
     "LAYERED_BOOTSTRAP_RS",
     "LAYERED_BODY_RS",
+    "LAYERED_BODY_RS_DENSE",
+    "LAYERED_BODY_RS_ROBUST",
     "RSEccProfile",
     "ReedSolomonError",
     "decode_rs_bytes",

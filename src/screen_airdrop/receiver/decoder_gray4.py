@@ -37,7 +37,7 @@ from screen_airdrop.common.protocol_gray4 import (
 from screen_airdrop.receiver.control_decode import decode_binary_control_header
 from screen_airdrop.receiver.decoder_compact import _run_locator as _run_locator_compact
 from screen_airdrop.receiver.detector_basic import _bbox_from_non_black
-from screen_airdrop.receiver.locator_basic import LocateError, LocateResult, LocatorConfig
+from screen_airdrop.receiver.locator.basic import LocateError, LocateResult, LocatorConfig
 from screen_airdrop.sender.encoder_gray4 import (
     Gray4Layout,
     build_layout_gray4,

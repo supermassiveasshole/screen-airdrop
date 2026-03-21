@@ -189,6 +189,22 @@ def test_layered_dump_replay_report_has_protocol_debug(tmp_path: Path):
     assert (out_dir / src.name).exists()
 
 
+def test_layered_dump_replay_240x144_stateful_geometry_completes(tmp_path: Path):
+    src = create_payload_tree(tmp_path, name="layered-src-240")
+    replay_report, out_dir = dump_and_replay(
+        tmp_path,
+        src=src,
+        protocol="layered",
+        module_grid="240x144",
+        replay_geometry_mode="stateful",
+    )
+    assert replay_report["status"] == "ok"
+    assert replay_report["missing_chunks"] == 0
+    assert replay_report["geometry_state_current"] in {"acquire", "locked"}
+    assert "geometry_diagnostics" in replay_report
+    assert (out_dir / src.name).exists()
+
+
 def test_gray4_dump_replay_report_has_protocol_debug(tmp_path: Path):
     src = create_payload_tree(tmp_path, name="gray4-src")
     replay_report, out_dir = dump_and_replay(

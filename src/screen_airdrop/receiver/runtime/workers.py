@@ -4,6 +4,7 @@ import asyncio
 import os
 import queue
 import signal
+import sys
 import threading
 import time
 from multiprocessing import shared_memory
@@ -33,6 +34,36 @@ class QueueLike(Protocol):
 
     def get(self) -> object: ...
     def put(self, item: object) -> object: ...
+
+
+_DEBUG_RUNTIME = os.getenv("SCREEN_AIRDROP_RUNTIME_DEBUG", "").lower() not in ("", "0", "false", "no")
+_SLOT_PREFETCH = 4
+_COPY_WORKERS = 2
+_COPY_QUEUE_DEPTH = 8
+
+
+def _debug_log(stage: str, **fields: object) -> None:
+    """Emit lightweight runtime debug logs when explicitly enabled."""
+    if not _DEBUG_RUNTIME:
+        return
+    payload = " ".join(f"{key}={value}" for key, value in fields.items())
+    print(
+        f"[runtime-debug pid={os.getpid()} stage={stage} t={time.time():.3f}] {payload}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _slot_bridge_loop(
+    slot_assign_queue: QueueLike,
+    local_slot_queue: "queue.Queue[object]",
+) -> None:
+    """Bridge blocking cross-process slot assignment into a local non-blocking queue."""
+    while True:
+        item = slot_assign_queue.get()
+        local_slot_queue.put(item)
+        if item is None:
+            return
 
 
 def _close_queue(q: object) -> None:
@@ -174,6 +205,8 @@ def _geometry_state_from_meta(
 def _meta_snapshot(meta: object) -> object:
     return SimpleNamespace(
         mask_id=getattr(meta, "mask_id", -1),
+        body_profile_id=getattr(meta, "body_profile_id", 0),
+        body_profile_name=getattr(meta, "body_profile_name", ""),
         avg_symbol_confidence=getattr(meta, "avg_symbol_confidence", 0.0),
         total_decode_ms=getattr(meta, "total_decode_ms", 0.0),
         payload_low_conf_symbols=getattr(meta, "payload_low_conf_symbols", 0),
@@ -207,32 +240,26 @@ def _rgba_zero_copy(src_raw: bytes, dst_view: np.ndarray) -> None:
     dst_view[...] = bgra
 
 
-async def _async_copy_task(
-    shot_raw: bytes,
+def _timed_rgba_zero_copy(src_raw: bytes, dst_view: np.ndarray) -> float:
+    """Run RGBA copy and return the memcpy wall time in milliseconds."""
+    t0 = time.perf_counter()
+    _rgba_zero_copy(src_raw, dst_view)
+    t1 = time.perf_counter()
+    return (t1 - t0) * 1000.0
+
+
+def _emit_filled_slot(
+    *,
+    descriptor_queue: QueueLike,
     slot_id: int,
     generation: int,
     capture_index: int,
     width: int,
     height: int,
-    slot_views: Sequence[np.ndarray],
-    descriptor_queue: QueueLike,
     grab_ms: float,
+    copy_ms: float,
 ) -> None:
-    """
-    Async copy task that runs in thread pool.
-
-    This allows the grab loop to continue immediately after capture
-    without waiting for the memory copy to complete.
-    """
-    t0 = time.perf_counter()
-
-    # Run the memory copy in a thread pool to avoid blocking the event loop
-    await asyncio.to_thread(_rgba_zero_copy, shot_raw, slot_views[int(slot_id)])
-
-    t1 = time.perf_counter()
-    copy_ms = (t1 - t0) * 1000.0
-
-    # Send completion event
+    """Publish a filled-slot event after copy finishes."""
     event = FilledSlotEvent(
         descriptor=FrameSlotDescriptor(
             slot_id=int(slot_id),
@@ -250,6 +277,100 @@ async def _async_copy_task(
         copy_ms=copy_ms,
     )
     descriptor_queue.put(event)
+
+
+def _copy_job_inline(
+    *,
+    shot_raw: bytes,
+    slot_id: int,
+    generation: int,
+    capture_index: int,
+    width: int,
+    height: int,
+    slot_views: Sequence[np.ndarray],
+    descriptor_queue: QueueLike,
+    grab_ms: float,
+) -> None:
+    """Run a copy job synchronously and emit timing/debug output."""
+    t0 = time.perf_counter()
+    _debug_log(
+        "copy_start",
+        slot_id=slot_id,
+        generation=generation,
+        capture_index=capture_index,
+        width=width,
+        height=height,
+        bytes=len(shot_raw),
+    )
+    copy_exec_ms = _timed_rgba_zero_copy(shot_raw, slot_views[int(slot_id)])
+    t1 = time.perf_counter()
+    copy_ms = (t1 - t0) * 1000.0
+    copy_wait_ms = max(0.0, copy_ms - float(copy_exec_ms))
+    _emit_filled_slot(
+        descriptor_queue=descriptor_queue,
+        slot_id=slot_id,
+        generation=generation,
+        capture_index=capture_index,
+        width=width,
+        height=height,
+        grab_ms=grab_ms,
+        copy_ms=copy_ms,
+    )
+    _debug_log(
+        "copy_done",
+        slot_id=slot_id,
+        generation=generation,
+        capture_index=capture_index,
+        copy_ms=round(copy_ms, 3),
+        copy_exec_ms=round(float(copy_exec_ms), 3),
+        copy_wait_ms=round(copy_wait_ms, 3),
+    )
+
+
+def _copy_worker_loop(
+    *,
+    copy_queue: "queue.Queue[object]",
+    slot_views: Sequence[np.ndarray],
+    descriptor_queue: QueueLike,
+    inflight_state: dict[str, int],
+    inflight_lock: threading.Lock,
+) -> None:
+    """Dedicated copy worker to avoid asyncio/to_thread scheduling jitter."""
+    while True:
+        job = copy_queue.get()
+        if job is None:
+            return
+        with inflight_lock:
+            inflight_state["count"] += 1
+        try:
+            (
+                shot_raw,
+                slot_id,
+                generation,
+                capture_index,
+                width,
+                height,
+                grab_ms,
+            ) = cast(Tuple[bytes, int, int, int, int, int, float], job)
+            _copy_job_inline(
+                shot_raw=shot_raw,
+                slot_id=slot_id,
+                generation=generation,
+                capture_index=capture_index,
+                width=width,
+                height=height,
+                slot_views=slot_views,
+                descriptor_queue=descriptor_queue,
+                grab_ms=grab_ms,
+            )
+        finally:
+            with inflight_lock:
+                inflight_state["count"] -= 1
+
+
+def _copy_inflight(inflight_state: dict[str, int], inflight_lock: threading.Lock) -> int:
+    with inflight_lock:
+        return inflight_state["count"]
 
 
 async def _async_grab_loop(
@@ -286,91 +407,206 @@ async def _async_grab_loop(
             monitor_region=monitor_region,
         )
         monitor = {"left": x, "top": y, "width": w, "height": h}
+        _debug_log(
+            "grab_region",
+            monitor_index=monitor_index,
+            explicit_region=explicit_region,
+            monitor_left=x,
+            monitor_top=y,
+            monitor_width=w,
+            monitor_height=h,
+        )
         frame_interval = 1.0 / target_fps if target_fps > 0 else 0.0
         next_deadline = time.perf_counter()
         capture_index = 0
+        stats_window_start = time.perf_counter()
+        stats_window_grabs = 0
+        stats_window_starvations = 0
+        stats_window_max_deadline_lag_ms = 0.0
+        stats_window_max_slot_depth = 0
+        stats_window_max_cpu_grab_ms = 0.0
+        local_slot_queue: "queue.Queue[object]" = queue.Queue(maxsize=_SLOT_PREFETCH)
+        copy_queue: "queue.Queue[object]" = queue.Queue(maxsize=_COPY_QUEUE_DEPTH)
+        inflight_lock = threading.Lock()
+        inflight_state = {"count": 0}
+        copy_workers: List[threading.Thread] = []
+        slot_bridge = threading.Thread(
+            target=_slot_bridge_loop,
+            args=(slot_assign_queue, local_slot_queue),
+            name="ScreenLiveSlotBridge",
+            daemon=True,
+        )
+        slot_bridge.start()
+        for worker_index in range(_COPY_WORKERS):
+            worker = threading.Thread(
+                target=_copy_worker_loop,
+                kwargs={
+                    "copy_queue": copy_queue,
+                    "slot_views": slot_views,
+                    "descriptor_queue": descriptor_queue,
+                    "inflight_state": inflight_state,
+                    "inflight_lock": inflight_lock,
+                },
+                name=f"ScreenLiveCopyWorker-{worker_index}",
+                daemon=True,
+            )
+            worker.start()
+            copy_workers.append(worker)
 
-        with mss.mss() as sct:
-            while not stop_event.is_set():
-                now = time.perf_counter()
+        try:
+            with mss.mss() as sct:
+                while not stop_event.is_set():
+                    now = time.perf_counter()
 
-                # Check if we've reached the deadline
-                if now < next_deadline:
-                    # Sleep until deadline (use small sleep to check stop_event)
-                    await asyncio.sleep(min(0.001, (next_deadline - now) / 2))
-                    continue
+                    # Check if we've reached the deadline
+                    if now < next_deadline:
+                        # Sleep until deadline (use small sleep to check stop_event)
+                        await asyncio.sleep(min(0.001, (next_deadline - now) / 2))
+                        continue
 
-                # Try to get a slot (non-blocking)
-                slot_available = False
-                slot_id: Optional[int] = None
-                generation: Optional[int] = None
-
-                try:
-                    wait_t0 = time.perf_counter()
-                    item = slot_assign_queue.get()  # type: ignore[call-arg]
-                    wait_t1 = time.perf_counter()
-                    if item is None:
-                        break
-                    slot_id, generation = cast(Tuple[int, int], item)
-                    slot_available = True
-                    slot_wait_ms = (wait_t1 - wait_t0) * 1000.0
-                except queue.Empty:
                     slot_available = False
+                    slot_id: Optional[int] = None
+                    generation: Optional[int] = None
+                    slot_wait_ms = 0.0
+                    local_slot_depth = local_slot_queue.qsize()
+                    deadline_lag_ms = max(0.0, (now - next_deadline) * 1000.0)
+                    if deadline_lag_ms > stats_window_max_deadline_lag_ms:
+                        stats_window_max_deadline_lag_ms = deadline_lag_ms
+                    if local_slot_depth > stats_window_max_slot_depth:
+                        stats_window_max_slot_depth = local_slot_depth
 
-                # Always grab at deadline, regardless of slot availability
-                try:
-                    t0 = time.perf_counter()
-                    shot = sct.grab(monitor)
-                    t1 = time.perf_counter()
-                    grab_ms = (t1 - t0) * 1000.0
+                    try:
+                        wait_t0 = time.perf_counter()
+                        item = local_slot_queue.get_nowait()
+                        wait_t1 = time.perf_counter()
+                        if item is None:
+                            _debug_log("slot_sentinel")
+                            break
+                        slot_id, generation = cast(Tuple[int, int], item)
+                        slot_available = True
+                        slot_wait_ms = (wait_t1 - wait_t0) * 1000.0
+                        _debug_log(
+                            "slot_acquired",
+                            slot_id=slot_id,
+                            generation=generation,
+                            slot_wait_ms=round(slot_wait_ms, 3),
+                            local_slot_depth=local_slot_depth,
+                        )
+                    except queue.Empty:
+                        slot_available = False
 
-                    if slot_available and slot_id is not None and generation is not None:
-                        # We have a slot, start async copy
-                        # Convert shot to bytes for thread-safe passing
-                        shot_raw = bytes(shot.raw)
+                        # Always grab at deadline, regardless of slot availability
+                    try:
+                        t0 = time.perf_counter()
+                        cpu_t0 = time.thread_time()
+                        shot = sct.grab(monitor)
+                        cpu_t1 = time.thread_time()
+                        t1 = time.perf_counter()
+                        grab_ms = (t1 - t0) * 1000.0
+                        cpu_grab_ms = (cpu_t1 - cpu_t0) * 1000.0
+                        if cpu_grab_ms > stats_window_max_cpu_grab_ms:
+                            stats_window_max_cpu_grab_ms = cpu_grab_ms
+                        _debug_log(
+                            "grab_done",
+                            slot_available=slot_available,
+                            slot_id=slot_id,
+                            generation=generation,
+                            grab_ms=round(grab_ms, 3),
+                            cpu_grab_ms=round(cpu_grab_ms, 3),
+                            inflight_copies=_copy_inflight(inflight_state, inflight_lock),
+                            local_slot_depth=local_slot_depth,
+                            deadline_lag_ms=round(deadline_lag_ms, 3),
+                        )
+                        stats_window_grabs += 1
 
-                        # Create async copy task (non-blocking)
-                        asyncio.create_task(
-                            _async_copy_task(
-                                shot_raw=shot_raw,
-                                slot_id=slot_id,
-                                generation=generation,
-                                capture_index=capture_index,
-                                width=w,
-                                height=h,
-                                slot_views=slot_views,
-                                descriptor_queue=descriptor_queue,
-                                grab_ms=grab_ms,
+                        if slot_available and slot_id is not None and generation is not None:
+                            shot_raw = bytes(shot.raw)
+                            job = (
+                                shot_raw,
+                                int(slot_id),
+                                int(generation),
+                                int(capture_index),
+                                int(w),
+                                int(h),
+                                float(grab_ms),
                             )
+                            try:
+                                copy_queue.put_nowait(job)
+                            except queue.Full:
+                                _debug_log(
+                                    "copy_queue_full",
+                                    slot_id=slot_id,
+                                    generation=generation,
+                                    capture_index=capture_index,
+                                )
+                                _copy_job_inline(
+                                    shot_raw=shot_raw,
+                                    slot_id=int(slot_id),
+                                    generation=int(generation),
+                                    capture_index=int(capture_index),
+                                    width=int(w),
+                                    height=int(h),
+                                    slot_views=slot_views,
+                                    descriptor_queue=descriptor_queue,
+                                    grab_ms=float(grab_ms),
+                                )
+                            descriptor_queue.put({"kind": "slot_wait_ms", "value": slot_wait_ms})
+                            capture_index += 1
+                        else:
+                            # No slot available, track starvation
+                            stats_window_starvations += 1
+                            _debug_log(
+                                "grab_starvation",
+                                grab_ms=round(grab_ms, 3),
+                                local_slot_depth=local_slot_depth,
+                                deadline_lag_ms=round(deadline_lag_ms, 3),
+                            )
+                            descriptor_queue.put({"kind": "grab_slot_starvation"})
+                            descriptor_queue.put(
+                                {
+                                    "kind": "raw_grab_stats",
+                                    "grab_ms": grab_ms,
+                                }
+                            )
+
+                    except Exception as exc:
+                        _debug_log("grab_error", error=str(exc))
+                        descriptor_queue.put({"kind": "error", "stage": "grab", "error": str(exc)})
+
+                    # Update deadline
+                    next_deadline += frame_interval
+                    now_after = time.perf_counter()
+                    if now_after >= next_deadline:
+                        # We're behind schedule, reset deadline
+                        next_deadline = now_after
+
+                    stats_now = time.perf_counter()
+                    if stats_now - stats_window_start >= 1.0:
+                        _debug_log(
+                            "grab_window",
+                            grabs=stats_window_grabs,
+                            starvations=stats_window_starvations,
+                            max_deadline_lag_ms=round(stats_window_max_deadline_lag_ms, 3),
+                            max_local_slot_depth=stats_window_max_slot_depth,
+                            max_cpu_grab_ms=round(stats_window_max_cpu_grab_ms, 3),
                         )
-
-                        descriptor_queue.put({"kind": "slot_wait_ms", "value": slot_wait_ms})
-                        capture_index += 1
-                    else:
-                        # No slot available, track starvation
-                        descriptor_queue.put({"kind": "grab_slot_starvation"})
-                        descriptor_queue.put(
-                            {
-                                "kind": "raw_grab_stats",
-                                "grab_ms": grab_ms,
-                            }
-                        )
-
-                except Exception as exc:
-                    descriptor_queue.put({"kind": "error", "stage": "grab", "error": str(exc)})
-
-                # Update deadline
-                next_deadline += frame_interval
-                now_after = time.perf_counter()
-                if now_after >= next_deadline:
-                    # We're behind schedule, reset deadline
-                    next_deadline = now_after
-
+                        stats_window_start = stats_now
+                        stats_window_grabs = 0
+                        stats_window_starvations = 0
+                        stats_window_max_deadline_lag_ms = 0.0
+                        stats_window_max_slot_depth = local_slot_depth
+                        stats_window_max_cpu_grab_ms = 0.0
+        finally:
+            for _ in copy_workers:
+                copy_queue.put(None)
+            for worker in copy_workers:
+                worker.join(timeout=1.0)
     except Exception as exc:  # pragma: no cover
+        _debug_log("grab_loop_error", error=str(exc))
         descriptor_queue.put({"kind": "error", "stage": "grab", "error": str(exc)})
 
 
-def _grab_process_main(
+def grab_process_main(
     *,
     slot_assign_queue: QueueLike,
     descriptor_queue: QueueLike,
@@ -420,6 +656,12 @@ def _grab_process_main(
                 monitor_index=monitor_index,
             )
         )
+    except Exception as exc:  # pragma: no cover
+        _debug_log("grab_process_error", error=str(exc))
+        try:
+            descriptor_queue.put({"kind": "error", "stage": "grab", "error": str(exc)})
+        except Exception:
+            pass
     finally:
         for shm in shms:
             try:
@@ -428,12 +670,11 @@ def _grab_process_main(
                 pass
 
 
-def _decode_worker_main(
+def decode_worker_main(
     *,
     worker_id: int,
     assignment_queue: Any,
     result_queue: Any,
-    stop_event: Any,
     slot_names: Sequence[str],
     width: int,
     height: int,
@@ -471,7 +712,6 @@ def _decode_worker_main(
             frame_rgba = frames[descriptor.slot_id]
             frame = frame_rgba[:, :, :3]  # RGB view, no copy
             t_attach1 = time.perf_counter()
-            time.perf_counter()
             try:
                 decode_mode = "reacquire_locator"
                 geometry_snapshot = assignment.geometry_state
@@ -556,11 +796,10 @@ def _decode_worker_main(
                 pass
 
 
-def _dump_worker_main(
+def dump_worker_main(
     *,
     dump_queue: Any,
     dump_event_queue: Any,
-    stop_event: Any,
     slot_names: Sequence[str],
     width: int,
     height: int,
@@ -608,11 +847,10 @@ def _dump_worker_main(
                 pass
 
 
-def _prep_process_main(
+def prep_process_main(
     *,
     prep_input_queue: Any,
     prep_output_queue: Any,
-    stop_event: Any,
     slot_names: Sequence[str],
     width: int,
     height: int,

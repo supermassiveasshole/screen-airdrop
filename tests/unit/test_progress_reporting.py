@@ -1,7 +1,5 @@
 """Tests for progress reporting system."""
 
-import pytest
-
 from screen_airdrop.receiver.runtime.console_reporter import ConsoleProgressReporter
 from screen_airdrop.receiver.runtime.progress_reporter import SilentProgressReporter
 from screen_airdrop.receiver.runtime.stats_formatter import (
@@ -20,6 +18,7 @@ def test_screen_live_formatter_basic():
         "duplicate_frames": 30,
         "dropped_queue_full": 1,
         "dropped_slot_unavailable": 2,
+        "dropped_slot_starvation": 5,
         "decode_queue_depth": 3,
         "capture_overwrite_count": 0,
         "prep_backlog": 0,
@@ -32,7 +31,7 @@ def test_screen_live_formatter_basic():
     assert "decoded=50" in line
     assert "assembled=48" in line
     assert "missing=10" in line
-    assert "dropped=1/2" in line
+    assert "dropped=8(q=1 slot=2 starve=5)" in line
     assert "dedup=30" in line
 
 
@@ -61,6 +60,7 @@ def test_screen_live_formatter_with_delta():
         "duplicate_frames": 30,
         "dropped_queue_full": 1,
         "dropped_slot_unavailable": 2,
+        "dropped_slot_starvation": 5,
         "decode_queue_depth": 3,
         "capture_overwrite_count": 0,
         "prep_backlog": 0,
@@ -101,6 +101,7 @@ def test_screen_live_formatter_timing_metrics():
         "duplicate_frames": 30,
         "dropped_queue_full": 0,
         "dropped_slot_unavailable": 0,
+        "dropped_slot_starvation": 0,
         "decode_queue_depth": 0,
         "capture_overwrite_count": 0,
         "prep_backlog": 0,

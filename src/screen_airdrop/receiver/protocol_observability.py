@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Mapping, Optional
 from screen_airdrop.common.ecc_rs import LAYERED_BOOTSTRAP_RS
 from screen_airdrop.common.protocol_layered import (
     LAYERED_CONTROL_PATH_VERSION,
+    layered_body_ecc_profile,
     layered_bootstrap_payload_size_bytes,
 )
 
@@ -28,6 +29,8 @@ def _classify_gray4_decode_failure(decode_error: Optional[str]) -> str:
 
 def _classify_layered_decode_failure_detail(decode_error: str) -> str:
     raw = str(decode_error or "").strip().lower()
+    if "bootstrap template match failed" in raw:
+        return "bootstrap_template_match"
     if "control prefix" in raw:
         return "control_prefix"
     if "format parity mismatch" in raw:
@@ -189,6 +192,16 @@ class LayeredReportAdapter(ProtocolReportAdapter):
     body_rs_fail_count: int = 0
     body_crc_fail_count: int = 0
     decode_stage_counts: Dict[str, int] = field(default_factory=dict)
+    body_profile_id: int = 0
+    body_profile_name: str = ""
+    body_ecc_profile_id: int = 0
+    control_reference_decode_mode: str = ""
+    bootstrap_template_best_score_sum: float = 0.0
+    bootstrap_template_best_score_count: int = 0
+    bootstrap_template_best_score_min: float = 0.0
+    bootstrap_template_margin_sum: float = 0.0
+    bootstrap_template_margin_count: int = 0
+    bootstrap_template_margin_min: float = 0.0
 
     @staticmethod
     def _trace_attempts(trace: Mapping[str, object]) -> List[Mapping[str, object]]:
@@ -199,6 +212,9 @@ class LayeredReportAdapter(ProtocolReportAdapter):
 
     def _accumulate_trace(self, trace: Mapping[str, object], *, is_failure: bool) -> None:
         attempts = self._trace_attempts(trace)
+        reference_mode = str(trace.get("control_reference_decode_mode", "") or "")
+        if reference_mode:
+            self.control_reference_decode_mode = reference_mode
         self.bootstrap_attempt_count += int(trace.get("bootstrap_attempt_count", 0) or len(attempts))
         if attempts:
             for attempt in attempts:
@@ -219,6 +235,22 @@ class LayeredReportAdapter(ProtocolReportAdapter):
                 self.bootstrap_erasure_symbol_count_max = max(
                     self.bootstrap_erasure_symbol_count_max, erasure_count
                 )
+                template_best_score = float(attempt.get("template_best_score_avg", 0.0) or 0.0)
+                if self.bootstrap_template_best_score_count <= 0:
+                    self.bootstrap_template_best_score_min = template_best_score
+                else:
+                    self.bootstrap_template_best_score_min = min(
+                        self.bootstrap_template_best_score_min, template_best_score
+                    )
+                self.bootstrap_template_best_score_sum += template_best_score
+                self.bootstrap_template_best_score_count += 1
+                template_margin = float(attempt.get("template_margin_avg", 0.0) or 0.0)
+                if self.bootstrap_template_margin_count <= 0:
+                    self.bootstrap_template_margin_min = template_margin
+                else:
+                    self.bootstrap_template_margin_min = min(self.bootstrap_template_margin_min, template_margin)
+                self.bootstrap_template_margin_sum += template_margin
+                self.bootstrap_template_margin_count += 1
                 stage = str(attempt.get("decode_stage", "") or "")
                 if stage:
                     self.decode_stage_counts[stage] = self.decode_stage_counts.get(stage, 0) + 1
@@ -247,6 +279,22 @@ class LayeredReportAdapter(ProtocolReportAdapter):
             self.bootstrap_erasure_symbol_count_sum += float(erasure_count)
             self.bootstrap_erasure_symbol_count_count += 1
             self.bootstrap_erasure_symbol_count_max = max(self.bootstrap_erasure_symbol_count_max, erasure_count)
+            template_best_score = float(trace.get("bootstrap_template_best_score_avg", 0.0) or 0.0)
+            if self.bootstrap_template_best_score_count <= 0:
+                self.bootstrap_template_best_score_min = template_best_score
+            else:
+                self.bootstrap_template_best_score_min = min(
+                    self.bootstrap_template_best_score_min, template_best_score
+                )
+            self.bootstrap_template_best_score_sum += template_best_score
+            self.bootstrap_template_best_score_count += 1
+            template_margin = float(trace.get("bootstrap_template_margin_avg", 0.0) or 0.0)
+            if self.bootstrap_template_margin_count <= 0:
+                self.bootstrap_template_margin_min = template_margin
+            else:
+                self.bootstrap_template_margin_min = min(self.bootstrap_template_margin_min, template_margin)
+            self.bootstrap_template_margin_sum += template_margin
+            self.bootstrap_template_margin_count += 1
             stage = str(trace.get("control_band_decode_stage", "") or "")
             if stage:
                 self.decode_stage_counts[stage] = self.decode_stage_counts.get(stage, 0) + 1
@@ -270,6 +318,10 @@ class LayeredReportAdapter(ProtocolReportAdapter):
         trace = getattr(meta, "control_trace", None)
         if isinstance(trace, Mapping):
             self._accumulate_trace(trace, is_failure=False)
+        self.body_profile_id = int(getattr(meta, "body_profile_id", self.body_profile_id) or 0)
+        self.body_profile_name = str(getattr(meta, "body_profile_name", self.body_profile_name) or "")
+        if self.body_profile_id:
+            self.body_ecc_profile_id = int(layered_body_ecc_profile(self.body_profile_id).profile_id)
 
     def accumulate_failure(
         self,
@@ -284,6 +336,8 @@ class LayeredReportAdapter(ProtocolReportAdapter):
             self.bootstrap_rs_fail_count += 1
         elif detail == "bootstrap_crc":
             self.bootstrap_crc_fail_count += 1
+        elif detail == "bootstrap_template_match":
+            self.decode_stage_counts[detail] = self.decode_stage_counts.get(detail, 0) + 1
         elif detail == "body_rs":
             self.body_rs_fail_count += 1
         elif detail == "body_crc":
@@ -309,6 +363,14 @@ class LayeredReportAdapter(ProtocolReportAdapter):
             "vote_margin_avg": 0.0
             if self.bootstrap_vote_margin_count <= 0
             else self.bootstrap_vote_margin_sum / float(self.bootstrap_vote_margin_count),
+            "template_best_score_avg": 0.0
+            if self.bootstrap_template_best_score_count <= 0
+            else self.bootstrap_template_best_score_sum / float(self.bootstrap_template_best_score_count),
+            "template_best_score_min": float(self.bootstrap_template_best_score_min),
+            "template_margin_avg": 0.0
+            if self.bootstrap_template_margin_count <= 0
+            else self.bootstrap_template_margin_sum / float(self.bootstrap_template_margin_count),
+            "template_margin_min": float(self.bootstrap_template_margin_min),
             "erasure_symbol_count_avg": 0.0
             if self.bootstrap_erasure_symbol_count_count <= 0
             else self.bootstrap_erasure_symbol_count_sum / float(self.bootstrap_erasure_symbol_count_count),
@@ -323,8 +385,12 @@ class LayeredReportAdapter(ProtocolReportAdapter):
         }
         layered_debug = {
             "control_path_version": int(self.control_path_version),
+            "control_reference_decode_mode": self.control_reference_decode_mode,
             "core_header": core_debug,
             "body": {
+                "profile_id": int(self.body_profile_id),
+                "profile_name": self.body_profile_name,
+                "ecc_profile_id": int(self.body_ecc_profile_id),
                 "rs_fail_count": int(self.body_rs_fail_count),
                 "crc_fail_count": int(self.body_crc_fail_count),
             },
@@ -350,12 +416,19 @@ class LayeredReportAdapter(ProtocolReportAdapter):
             "layered_bootstrap_threshold_avg": float(core_debug["threshold_avg"]),
             "layered_bootstrap_vote_margin_min": float(core_debug["vote_margin_min"]),
             "layered_bootstrap_vote_margin_avg": float(core_debug["vote_margin_avg"]),
+            "layered_bootstrap_template_best_score_avg": float(core_debug["template_best_score_avg"]),
+            "layered_bootstrap_template_best_score_min": float(core_debug["template_best_score_min"]),
+            "layered_bootstrap_template_margin_avg": float(core_debug["template_margin_avg"]),
+            "layered_bootstrap_template_margin_min": float(core_debug["template_margin_min"]),
             "layered_bootstrap_bit_fail_counts": list(self.bootstrap_bit_fail_counts),
             "layered_bootstrap_fail_examples": list(self.bootstrap_fail_examples),
             "layered_bootstrap_rs_fail_count": float(self.bootstrap_rs_fail_count),
             "layered_bootstrap_crc_fail_count": float(self.bootstrap_crc_fail_count),
+            "layered_control_reference_decode_mode": self.control_reference_decode_mode,
             "layered_body_rs_fail_count": float(self.body_rs_fail_count),
             "layered_body_crc_fail_count": float(self.body_crc_fail_count),
+            "layered_body_profile_id": float(self.body_profile_id),
+            "layered_body_ecc_profile_id": float(self.body_ecc_profile_id),
             "layered_control_prefix_fail_count": 0.0,
             "layered_format_fail_count": 0.0,
             "protocol_debug": {"layered_debug": layered_debug},

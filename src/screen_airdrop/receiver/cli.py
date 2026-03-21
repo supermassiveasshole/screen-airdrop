@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
+import signal
 import sys
 
 from screen_airdrop.receiver.assembler import ChunkAssembler
@@ -19,21 +21,87 @@ from screen_airdrop.receiver.runtime.pipeline_runner import PipelineRunner
 from screen_airdrop.receiver.stats import TransferStats
 
 
-def _build_source(config: ReceiverConfig, region):
+def _build_source(config: ReceiverConfig, capture_region):
     if config.is_replay_mode():
         if not config.frames_dir:
             raise ValueError("--frames-dir is required when --source replay")
         return FrameReplaySource(frames_dir=config.frames_dir)
-
-    capture_region = None
-    if config.roi_mode == "manual" and region is not None:
-        capture_region = region
 
     return ScreenCapture(
         window_title=config.window_title,
         region=capture_region,
         monitor_index=config.monitor_index,
     )
+
+
+def _select_capture_region(roi_policy: RoiPolicy, forced_roi):
+    del roi_policy
+    return forced_roi
+
+
+def _warn_window_title_fallback(config: ReceiverConfig) -> None:
+    if config.source != "screen" or not config.window_title:
+        return
+    if config.roi:
+        return
+    print(
+        "warning: --window-title is currently not used for real window lookup; "
+        "capture will fallback to full monitor. "
+        "Use --roi x,y,w,h or --roi-interactive for reliable decode."
+    )
+
+
+def _configure_debug_capture(config: ReceiverConfig, source) -> None:
+    if config.debug_dir and isinstance(source, ScreenCapture):
+        source.frame_diff_threshold = 0.0
+
+    if not config.debug_dir:
+        return
+
+    os.makedirs(config.debug_dir, exist_ok=True)
+    print(
+        f"debug enabled: dir={config.debug_dir} interval={config.debug_interval}s "
+        f"max_frames={config.debug_max_frames}"
+    )
+
+
+def _print_pipeline_banner(config: ReceiverConfig, forced_roi) -> None:
+    if config.is_replay_mode():
+        print(
+            f"replay pipeline: protocol={config.protocol} "
+            f"frames_dir={config.frames_dir}"
+        )
+        return
+
+    print(
+        f"screen live runtime: protocol={config.protocol} workers={config.decode_workers} "
+        f"prep={config.prep_process} capture_fps={config.capture_fps} "
+        f"mode={'manual' if forced_roi else 'auto'}"
+    )
+
+
+@contextlib.contextmanager
+def _pipeline_signal_guard(pipeline):
+    previous_sigint = signal.getsignal(signal.SIGINT)
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    shutting_down = False
+
+    def _handle_shutdown_signal(signum, frame):
+        del signum, frame
+        nonlocal shutting_down
+        if not shutting_down:
+            shutting_down = True
+            with contextlib.suppress(Exception):
+                pipeline.stop()
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGINT, _handle_shutdown_signal)
+    signal.signal(signal.SIGTERM, _handle_shutdown_signal)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, previous_sigint)
+        signal.signal(signal.SIGTERM, previous_sigterm)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -48,6 +116,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--monitor-index", type=int, default=1, help="mss monitor index (1-based)")
     parser.add_argument(
         "--frames-dir", default=None, help="directory with captured frames (replay source)"
+    )
+    parser.add_argument(
+        "--replay-geometry-mode",
+        choices=["stateful", "stateless"],
+        default="stateful",
+        help=argparse.SUPPRESS,
     )
 
     # Protocol and grid configuration
@@ -71,42 +145,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--roi", default=None, help="manual ROI as x,y,w,h (if not set, use auto detection)"
     )
     parser.add_argument(
-        "--region",
-        default=None,
-        help=argparse.SUPPRESS,
-    )
-    parser.add_argument(
         "--roi-interactive", action="store_true", help="enable interactive ROI selection"
-    )
-    parser.add_argument("--select-region", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--roi-profile", default=None, help=argparse.SUPPRESS)
-    parser.add_argument(
-        "--roi-mode",
-        choices=["auto", "manual", "auto_then_manual"],
-        default="auto_then_manual",
-        help=argparse.SUPPRESS,
-    )
-    parser.add_argument("--manual-roi-pad-px", type=int, default=0, help=argparse.SUPPRESS)
-    parser.add_argument("--manual-max-retries", type=int, default=1, help=argparse.SUPPRESS)
-    parser.add_argument("--auto-fail-threshold", type=int, default=5, help=argparse.SUPPRESS)
-    parser.add_argument(
-        "--detect-mode",
-        choices=["full", "track", "roi"],
-        default="track",
-        help=argparse.SUPPRESS,
-    )
-    parser.add_argument("--track-margin-px", type=int, default=96, help=argparse.SUPPRESS)
-    parser.add_argument(
-        "--locator-engine",
-        choices=["new", "legacy", "auto"],
-        default="auto",
-        help=argparse.SUPPRESS,
-    )
-    parser.add_argument(
-        "--locator-confidence-threshold",
-        type=float,
-        default=0.55,
-        help=argparse.SUPPRESS,
     )
 
     # Output configuration
@@ -143,8 +182,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--decode-workers",
         type=int,
-        default=0,
-        help="number of parallel decode workers (0=auto)",
+        default=1,
+        help="number of parallel decode workers",
     )
     parser.add_argument(
         "--prep-process",
@@ -180,61 +219,22 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None):
     """Simplified main function using factory modules."""
-    # Parse configuration
     args = build_parser().parse_args(argv)
     config = ReceiverConfig.from_args(args)
     config.validate()
     roi_policy = RoiPolicy.from_args(args)
-    roi_policy.apply_to_args(args)
 
-    # Warning for window-title
-    if config.source == "screen" and config.window_title and not (config.roi or config.region):
-        print(
-            "warning: --window-title is currently not used for real window lookup; "
-            "capture will fallback to full monitor. "
-            "Use --roi x,y,w,h or --roi-interactive for reliable decode."
-        )
+    _warn_window_title_fallback(config)
 
-    # Initialize core components
     assembler = ChunkAssembler()
     stats = TransferStats()
-
-    # Setup ROI (handles parsing, validation, interactive selection)
     forced_roi = setup_roi(config, roi_policy, stats)
-
-    # Create source
-    source = _build_source(config, forced_roi)
-    if config.debug_dir and isinstance(source, ScreenCapture):
-        source.frame_diff_threshold = 0.0
-
-    # Setup debug directory
-    if config.debug_dir:
-        os.makedirs(config.debug_dir, exist_ok=True)
-        print(
-            f"debug enabled: dir={config.debug_dir} interval={config.debug_interval}s "
-            f"max_frames={config.debug_max_frames}"
-        )
-
-    # Create pipeline using factory
+    capture_region = _select_capture_region(roi_policy, forced_roi)
+    source = _build_source(config, capture_region)
+    _configure_debug_capture(config, source)
     pipeline = create_pipeline(config, source, assembler, forced_roi)
-
-    # Print pipeline info
-    if config.is_replay_mode():
-        print(
-            f"replay pipeline: protocol={config.protocol} "
-            f"frames_dir={config.frames_dir}"
-        )
-    else:
-        print(
-            f"screen live runtime: protocol={config.protocol} workers={config.decode_workers} "
-            f"prep={config.prep_process} capture_fps={config.capture_fps} "
-            f"mode={'manual' if forced_roi else 'auto'}"
-        )
-
-    # Create progress reporter using factory
+    _print_pipeline_banner(config, forced_roi)
     progress_reporter = create_progress_reporter(config.source)
-
-    # Create runner and run
     runner = PipelineRunner(
         pipeline=pipeline,
         assembler=assembler,
@@ -245,11 +245,10 @@ def main(argv=None):
         progress_reporter=progress_reporter,
     )
 
-    exit_code, report = runner.run()
+    with _pipeline_signal_guard(pipeline):
+        exit_code, report = runner.run()
 
-    # Write report
     report.dump(config.report_json)
-
     return exit_code
 
 

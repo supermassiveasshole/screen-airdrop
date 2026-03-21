@@ -26,7 +26,7 @@ from screen_airdrop.receiver.detector_basic import (
     detect_symbol_quad,
 )
 from screen_airdrop.receiver.detector_compact import detect_symbol_quad_compact
-from screen_airdrop.receiver.locator_basic import (
+from screen_airdrop.receiver.locator.basic import (
     LocateError,
     LocateFailReason,
     LocateQuality,
@@ -39,7 +39,7 @@ from screen_airdrop.receiver.locator_basic import (
     _score_geometry,
     _warp_and_grid,
 )
-from screen_airdrop.receiver.locator_basic import (
+from screen_airdrop.receiver.locator.basic import (
     _bbox_from_quad as _locator_bbox_from_quad,
 )
 from screen_airdrop.sender.encoder_compact import CompactLayout, build_layout_compact

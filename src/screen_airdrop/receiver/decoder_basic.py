@@ -20,7 +20,7 @@ from screen_airdrop.common.protocol_basic import (
     decode_header_and_payload_bits,
 )
 from screen_airdrop.receiver.detector_basic import _bbox_from_non_black, detect_symbol_quad
-from screen_airdrop.receiver.locator_basic import (
+from screen_airdrop.receiver.locator.basic import (
     LocateError,
     LocateFailReason,
     LocateResult,

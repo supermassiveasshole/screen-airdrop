@@ -19,10 +19,10 @@ from screen_airdrop.receiver.runtime.slot_manager import SlotManager, SlotState
 from screen_airdrop.receiver.runtime.stats import ScreenLiveRuntimeStats
 from screen_airdrop.receiver.runtime.workers import (
     _attach_shared_memory_for_child,
-    _decode_worker_main,
-    _dump_worker_main,
-    _grab_process_main,
-    _prep_process_main,
+    decode_worker_main,
+    dump_worker_main,
+    grab_process_main,
+    prep_process_main,
 )
 
 __all__ = [
@@ -39,8 +39,8 @@ __all__ = [
     "fingerprint_diff",
     "is_duplicate",
     "_attach_shared_memory_for_child",
-    "_grab_process_main",
-    "_decode_worker_main",
-    "_dump_worker_main",
-    "_prep_process_main",
+    "grab_process_main",
+    "decode_worker_main",
+    "dump_worker_main",
+    "prep_process_main",
 ]

@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import numpy as np
 
-from screen_airdrop.common.protocol_basic import FrameHeaderBasic
+from screen_airdrop.common.protocol_basic import ECC_H, ECC_Q, FrameHeaderBasic
 from screen_airdrop.common.protocol_interface import LayoutInfo, ProtocolEncoder
-from screen_airdrop.common.protocol_layered import layered_layout_info
+from screen_airdrop.common.protocol_layered import (
+    LAYERED_BODY_PROFILE_DEFAULT,
+    LAYERED_BODY_PROFILE_ROBUST,
+    layered_layout_info,
+)
 from screen_airdrop.sender.encoder_layered import (
     build_layout_layered,
     encode_frame_layered,
@@ -32,8 +36,23 @@ class LayeredProtocolEncoder(ProtocolEncoder):
         self.corner_size = corner_size
         self.outer_padding_px = outer_padding_px
         self.outer_padding_white = outer_padding_white
-        self._layout = build_layout_layered(grid_w, grid_h, guard_band, corner_size)
-        self._capacity = frame_capacity_bytes_layered(grid_w, grid_h, guard_band, corner_size)
+        self.body_profile_id = (
+            LAYERED_BODY_PROFILE_ROBUST if ecc_level in (ECC_Q, ECC_H) else LAYERED_BODY_PROFILE_DEFAULT
+        )
+        self._layout = build_layout_layered(
+            grid_w,
+            grid_h,
+            guard_band,
+            corner_size,
+            body_profile_id=self.body_profile_id,
+        )
+        self._capacity = frame_capacity_bytes_layered(
+            grid_w,
+            grid_h,
+            guard_band,
+            corner_size,
+            body_profile_id=self.body_profile_id,
+        )
 
     def get_layout(self) -> LayoutInfo:
         return layered_layout_info(
@@ -65,6 +84,7 @@ class LayeredProtocolEncoder(ProtocolEncoder):
             grid_h=self.grid_h,
             guard_band=self.guard_band,
             corner_size=self.corner_size,
+            body_profile_id=self.body_profile_id,
             outer_padding_px=self.outer_padding_px,
             outer_padding_white=self.outer_padding_white,
         )

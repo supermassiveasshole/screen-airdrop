@@ -3,6 +3,7 @@
   "reportMissingImports": false,
   "include": ["src", "tests", "tools"],
   "exclude": [
+    "**/.*",
     ".git",
     ".venv",
     ".ruff_cache",

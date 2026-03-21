@@ -47,6 +47,7 @@ def create_pipeline(
             grid_h=grid_h,
             guard_band=guard_band,
             corner_size=corner_size,
+            replay_geometry_mode=getattr(config, "replay_geometry_mode", "stateful"),
         )
     else:
         # Screen mode: use ScreenLiveRuntime

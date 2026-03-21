@@ -22,7 +22,7 @@ class TransferStats(object):
         self.locator_fail = 0
         self.locator_conf_sum = 0.0
 
-        self.roi_mode_used = "auto_then_manual"
+        self.roi_mode_used = "auto"
         self.manual_roi_applied = False
         self.auto_to_manual_switches = 0
         self.manual_select_attempts = 0

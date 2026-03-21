@@ -26,18 +26,12 @@ class ReceiverConfig:
 
     # ROI configuration
     roi: Optional[str]
-    region: Optional[str]
-    roi_profile: Optional[str]
-    roi_mode: str
     roi_interactive: bool
 
     # Decode configuration
     decode_workers: int
     prep_process: int
-    detect_mode: str
-    track_margin_px: int
-    locator_confidence_threshold: float
-    locator_engine: str
+    replay_geometry_mode: str
 
     # Capture configuration
     capture_fps: float
@@ -80,17 +74,11 @@ class ReceiverConfig:
             block_size=args.block_size,
             # ROI
             roi=args.roi,
-            region=args.region,
-            roi_profile=args.roi_profile,
-            roi_mode=args.roi_mode,
             roi_interactive=args.roi_interactive,
             # Decode
             decode_workers=args.decode_workers,
             prep_process=args.prep_process,
-            detect_mode=args.detect_mode,
-            track_margin_px=args.track_margin_px,
-            locator_confidence_threshold=args.locator_confidence_threshold,
-            locator_engine=args.locator_engine,
+            replay_geometry_mode=args.replay_geometry_mode,
             # Capture
             capture_fps=args.capture_fps,
             capture_dump_dir=args.capture_dump_dir,
@@ -125,6 +113,9 @@ class ReceiverConfig:
 
         if self.decode_workers < 0:
             raise ValueError("decode-workers must be non-negative")
+
+        if self.replay_geometry_mode not in {"stateful", "stateless"}:
+            raise ValueError("replay-geometry-mode must be stateful or stateless")
 
     def is_replay_mode(self) -> bool:
         """Check if in replay mode."""

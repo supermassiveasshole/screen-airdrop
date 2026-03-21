@@ -1,7 +1,11 @@
 """Runtime coordinator: pure event router."""
 
 import asyncio
+import os
+import queue
+import sys
 import threading
+import time
 from typing import Any, List, Optional
 
 from screen_airdrop.receiver.assembler import ChunkAssembler
@@ -20,6 +24,33 @@ from screen_airdrop.receiver.runtime.slot_manager import SlotManager
 from screen_airdrop.receiver.runtime.stats import ScreenLiveRuntimeStats
 
 _GRAB_OWNER = "grab"
+_DEBUG_RUNTIME = os.getenv("SCREEN_AIRDROP_RUNTIME_DEBUG", "").lower() not in ("", "0", "false", "no")
+
+
+def _debug_log(stage: str, **fields: object) -> None:
+    if not _DEBUG_RUNTIME:
+        return
+    payload = " ".join(f"{key}={value}" for key, value in fields.items())
+    print(
+        f"[runtime-debug pid={os.getpid()} stage={stage} t={time.time():.3f}] {payload}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _queue_get_with_stop(queue_obj: Any, stop_event: threading.Event) -> object:
+    """Poll a multiprocessing queue without leaving a worker thread stuck forever."""
+    reader = getattr(queue_obj, "_reader", None)
+    poll = getattr(reader, "poll", None)
+    if callable(poll):
+        while not stop_event.is_set():
+            if poll(0.1):
+                return queue_obj.get()
+        return None
+    try:
+        return queue_obj.get(timeout=0.1)
+    except queue.Empty:
+        return None
 
 
 class RuntimeCoordinator:
@@ -44,6 +75,7 @@ class RuntimeCoordinator:
         stop_event: threading.Event,
         stream_id: str,
         on_frame_callback: Optional[Any] = None,
+        on_grab_activity: Optional[Any] = None,
     ):
         """Initialize coordinator.
 
@@ -81,6 +113,7 @@ class RuntimeCoordinator:
         self._stop_event = stop_event
         self._stream_id = stream_id
         self._on_frame_callback = on_frame_callback
+        self._on_grab_activity = on_grab_activity
 
         # Internal state
         self._next_worker = 0
@@ -143,9 +176,11 @@ class RuntimeCoordinator:
     async def _process_grab_events(self) -> None:
         """Process grab events independently."""
         while not self._stop_event.is_set():
-            item = await asyncio.to_thread(self._grab_event_queue.get)
+            item = await asyncio.to_thread(
+                _queue_get_with_stop, self._grab_event_queue, self._stop_event
+            )
             if item is None:
-                break
+                continue
             await self._handle_grab_event(item)
 
     async def _process_prep_events_async(self) -> None:
@@ -163,17 +198,21 @@ class RuntimeCoordinator:
         """Process prep events (process mode) from prep_output_queue."""
         assert self._prep_output_queue is not None
         while not self._stop_event.is_set():
-            item = await asyncio.to_thread(self._prep_output_queue.get)
+            item = await asyncio.to_thread(
+                _queue_get_with_stop, self._prep_output_queue, self._stop_event
+            )
             if item is None:
-                break
+                continue
             self._handle_prep_result(item)
 
     async def _process_decode_events(self) -> None:
         """Process decode events independently."""
         while not self._stop_event.is_set():
-            item = await asyncio.to_thread(self._decode_result_queue.get)
+            item = await asyncio.to_thread(
+                _queue_get_with_stop, self._decode_result_queue, self._stop_event
+            )
             if item is None:
-                break
+                continue
             self._handle_decode_result(item)
 
             # Check if assembly complete
@@ -207,9 +246,11 @@ class RuntimeCoordinator:
         """Process dump events independently."""
         assert self._dump_event_queue is not None
         while not self._stop_event.is_set():
-            item = await asyncio.to_thread(self._dump_event_queue.get)
+            item = await asyncio.to_thread(
+                _queue_get_with_stop, self._dump_event_queue, self._stop_event
+            )
             if item is None:
-                break
+                continue
             self._handle_dump_result(item)
 
     async def _handle_grab_event(self, event: object) -> None:
@@ -223,6 +264,9 @@ class RuntimeCoordinator:
 
         # Handle slot starvation events
         if isinstance(event, dict) and event.get("kind") == "grab_slot_starvation":
+            if self._on_grab_activity is not None:
+                self._on_grab_activity()
+            _debug_log("coord_grab_starvation")
             with self._stats._lock:
                 self._stats.slot_starvation_events += 1
                 self._stats.dropped_slot_starvation += 1
@@ -233,6 +277,9 @@ class RuntimeCoordinator:
 
         # Handle raw grab stats (before slot assignment)
         if isinstance(event, dict) and event.get("kind") == "raw_grab_stats":
+            if self._on_grab_activity is not None:
+                self._on_grab_activity()
+            _debug_log("coord_raw_grab", grab_ms=event.get("grab_ms", 0.0))
             with self._stats._lock:
                 self._stats.raw_grab_frames += 1
                 self._stats.capture_grab_time_ms += float(event.get("grab_ms", 0.0) or 0.0)
@@ -241,6 +288,7 @@ class RuntimeCoordinator:
 
         # Handle slot wait metrics
         if isinstance(event, dict) and event.get("kind") == "slot_wait_ms":
+            _debug_log("coord_slot_wait", slot_wait_ms=event.get("value", 0.0))
             with self._stats._lock:
                 self._stats.slot_wait_ms += float(event.get("value", 0.0) or 0.0)
                 self._stats.slot_wait_ops += 1
@@ -251,6 +299,17 @@ class RuntimeCoordinator:
             return
 
         descriptor = event.descriptor
+
+        if self._on_grab_activity is not None:
+            self._on_grab_activity()
+        _debug_log(
+            "coord_filled",
+            slot_id=descriptor.slot_id,
+            generation=descriptor.generation,
+            capture_index=descriptor.capture_index,
+            copy_ms=round(event.copy_ms, 3),
+            grab_ms=round(event.grab_ms, 3),
+        )
 
         # Mark slot as filled
         if not self._slot_manager.mark_filled(descriptor, _GRAB_OWNER):
@@ -316,6 +375,12 @@ class RuntimeCoordinator:
             if dedup_score < 0.015:  # Duplicate threshold
                 # Duplicate frame
                 self._slot_manager.mark_duplicate_and_release(descriptor)
+                _debug_log(
+                    "coord_release_duplicate",
+                    slot_id=descriptor.slot_id,
+                    generation=descriptor.generation,
+                    capture_index=descriptor.capture_index,
+                )
                 self._dispatch_slot_to_grab()
                 with self._stats._lock:
                     self._stats.duplicate_frames += 1
@@ -328,6 +393,12 @@ class RuntimeCoordinator:
         elif isinstance(item, DuplicateSlotEvent):
             # Async mode: duplicate
             self._slot_manager.mark_duplicate_and_release(item.descriptor)
+            _debug_log(
+                "coord_release_duplicate",
+                slot_id=item.descriptor.slot_id,
+                generation=item.descriptor.generation,
+                capture_index=item.descriptor.capture_index,
+            )
             self._dispatch_slot_to_grab()
 
             with self._stats._lock:
@@ -395,6 +466,12 @@ class RuntimeCoordinator:
         """Build decode assignment."""
         worker_id = self._next_worker
         self._slot_manager.assign_decode(descriptor, worker_id)
+        geometry_state = self._geometry_tracker.current_geometry
+        forced_roi = self._geometry_tracker.get_current_roi()
+
+        if geometry_state is None:
+            with self._stats._lock:
+                self._stats.reacquire_attempt_count += 1
 
         return DecodeAssignment(
             descriptor=descriptor,
@@ -402,8 +479,8 @@ class RuntimeCoordinator:
             geometry_generation=self._geometry_tracker.current_generation,
             decode_owner=f"decode:{worker_id}",
             dump_requested=descriptor.dump_requested,
-            geometry_state=self._geometry_tracker.current_geometry,
-            forced_roi=self._geometry_tracker.get_current_roi(),
+            geometry_state=geometry_state,
+            forced_roi=forced_roi,
         )
 
     def _handle_decode_result(self, item: object) -> None:
@@ -450,24 +527,42 @@ class RuntimeCoordinator:
                 and self._stats.first_data_frame_ts is None
             ):  # FRAME_DATA
                 self._stats.first_data_frame_ts = completion.descriptor.ts
+            self._stats.protocol_report_adapter.accumulate_success(completion.meta)
 
         # Update geometry
-        if (
-            self._geometry_tracker.lock_mode != "locked"
-            and completion.proposed_geometry_state is not None
-        ):
-            self._geometry_tracker.propose_update(
+        previous_lock_mode = self._geometry_tracker.lock_mode
+        updated = False
+        if previous_lock_mode != "locked" and completion.proposed_geometry_state is not None:
+            updated = self._geometry_tracker.propose_update(
                 proposed_geometry=completion.proposed_geometry_state,
                 decode_quality=completion.decode_quality,
                 used_geometry_generation=completion.used_geometry_generation,
+                meta=completion.meta,
             )
+            if updated:
+                with self._stats._lock:
+                    self._stats.lock_acquire_to_locked += 1
 
         # Extract bbox and update ROI
         bbox = completion.meta.det_bbox if hasattr(completion, "meta") and hasattr(completion.meta, "det_bbox") else None
         self._geometry_tracker.record_success(
             geometry=completion.proposed_geometry_state,
             bbox=bbox,
+            decode_mode=completion.decode_mode,
         )
+        with self._stats._lock:
+            self._stats.locked_geometry_age_max = max(
+                self._stats.locked_geometry_age_max,
+                self._geometry_tracker.get_locked_geometry_age(),
+            )
+            if completion.decode_mode == "geometry_reuse":
+                current_geometry = self._geometry_tracker.current_geometry
+                if current_geometry is not None:
+                    self._stats.homography_rmse_reused_last = float(current_geometry.homography_rmse)
+            else:
+                geometry_state = completion.proposed_geometry_state
+                if geometry_state is not None:
+                    self._stats.homography_rmse_reacquired_last = float(geometry_state.homography_rmse)
 
         # Assemble chunk
         if completion.frame_type == 1:  # FRAME_DATA
@@ -485,6 +580,14 @@ class RuntimeCoordinator:
 
         # Complete decode and release slot
         self._slot_manager.complete_decode(completion.descriptor, completion.worker_id)
+        _debug_log(
+            "coord_release_after_decode_success",
+            slot_id=completion.descriptor.slot_id,
+            generation=completion.descriptor.generation,
+            worker_id=completion.worker_id,
+            frame_type=completion.frame_type,
+            chunk_id=completion.chunk_id,
+        )
         self._dispatch_slot_to_grab()
 
         # Callback
@@ -519,9 +622,18 @@ class RuntimeCoordinator:
                 self._stats.geometry_reuse_fail_count += 1
             else:
                 self._stats.reacquire_fail_count += 1
+            self._stats.protocol_report_adapter.accumulate_failure(
+                error,
+                failure_class=failure_class,
+                trace=getattr(completion, "context", None),
+            )
 
         # Record failure and check if should reacquire
-        should_reacquire = self._geometry_tracker.record_failure()
+        should_reacquire = self._geometry_tracker.record_failure(
+            decode_mode=completion.decode_mode,
+            failure_class=failure_class,
+            context=getattr(completion, "context", None),
+        )
 
         if should_reacquire:
             with self._stats._lock:
@@ -529,6 +641,12 @@ class RuntimeCoordinator:
 
         # Complete decode and release slot
         self._slot_manager.complete_decode(completion.descriptor, completion.worker_id)
+        _debug_log(
+            "coord_release_after_decode_failure",
+            slot_id=completion.descriptor.slot_id,
+            generation=completion.descriptor.generation,
+            worker_id=completion.worker_id,
+        )
         self._dispatch_slot_to_grab()
 
     def _handle_dump_result(self, item: object) -> None:
@@ -537,6 +655,11 @@ class RuntimeCoordinator:
             return
 
         self._slot_manager.clear_dump_reader(item.descriptor)
+        _debug_log(
+            "coord_release_after_dump",
+            slot_id=item.descriptor.slot_id,
+            generation=item.descriptor.generation,
+        )
         self._dispatch_slot_to_grab()
 
         with self._stats._lock:
@@ -564,6 +687,7 @@ class RuntimeCoordinator:
 
         try:
             self._grab_slot_queue.put((slot_id, generation))
+            _debug_log("coord_dispatch_slot", slot_id=slot_id, generation=generation)
         except Exception:
             with self._stats._lock:
                 self._stats.dropped_slot_unavailable += 1

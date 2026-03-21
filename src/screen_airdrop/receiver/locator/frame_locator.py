@@ -4,7 +4,7 @@ from typing import Callable, Optional, Tuple
 
 import numpy as np
 
-from screen_airdrop.receiver.locator_basic import LocateError, LocateResult, LocatorConfig
+from screen_airdrop.receiver.locator.basic import LocateError, LocateResult, LocatorConfig
 
 # 定位算法回调类型 (新签名：使用 LocatorConfig)
 LocatorFunc = Callable[

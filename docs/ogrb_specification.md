@@ -1,2378 +1,823 @@
-# OGRB Protocol Specification v2
+# OGRB Protocol Specification
 
-**OGRB (Overlapping Generation Rateless Broadcast)**
-
-Version: 2.0
-Status: Draft
-Date: 2026-03-15
-
----
+Version: 3.0-draft  
+Status: Design draft  
+Target system: Screen-Airdrop visual transmission pipeline
 
 ## 1. Introduction
 
-### 1.1 Purpose
+This document specifies the OGRB protocol family for Screen-Airdrop.
 
-This document specifies the OGRB (Overlapping Generation Rateless Broadcast) protocol version 2 for Screen-Airdrop. OGRB is designed to provide efficient, robust data transmission over visual broadcast channels with packet loss, decode failures, and limited feedback.
+OGRB is not a visual renderer. OGRB is not a frame format by itself. OGRB is a scheduling model that operates on explicitly defined transmission units and relies on a separate visual transport layer to carry them over a real screen-capture channel.
 
-### 1.2 What's New in v2
+The purpose of this rewrite is to make the protocol implementable without semantic ambiguity. In particular, it enforces:
 
-Version 2 introduces several architectural enhancements while maintaining backward compatibility with v1 concepts:
+1. strict separation between information semantics, scheduling, and visual transport
+2. explicit distinction between systematic symbols and coded equations
+3. an erasure-oriented channel model for real-world screen capture failure modes
+4. compatibility with existing Screen-Airdrop visual designs, especially layered rendering, compact control headers, and gray4 modulation
 
-1. **Realization Layer**: Visual diversity mechanisms to combat pattern-dependent decode failures
-2. **Policy Layer**: Optional ML-driven adaptive control
-3. **Enhanced Architecture**: Five-layer model for independent evolution
-4. **Realization Diversity**: Multiple visual representations per logical symbol
+This specification does not require erasure coding to be implemented immediately. It defines the architecture so that Phase 4 (erasure coding) and Phase 5 (OGRB scheduling) can be added without redesigning the visual layer again.
 
-### 1.3 Scope
+## 2. System Overview
 
-OGRB is not a single fixed-parameter protocol but a family of configurable operating points. It enables different trade-offs between:
+The system is defined as three strictly separated layers.
 
-- Recovery success rate
-- Revisit pressure control
-- Maximum throughput
-- Robustness to visual channel impairments
+### 2.1 Layer 1: Information Layer
 
-### 1.4 Visual Communication Channel Model
+This layer defines **what** is being transmitted.
 
-OGRB is specifically designed for **visual communication channels** such as screen-to-camera or remote desktop pipelines.
+Its output is a stream of `TransmissionUnit` objects. A `TransmissionUnit` is either:
 
-Typical channel path:
+1. `SYSTEMATIC`
+   A source symbol from a generation.
+2. `CODED`
+   A coded equation over source symbols of a generation.
 
-```
-display → compositor → remote desktop → compression → capture → decoding
-```
+This layer owns:
 
-These channels differ from traditional packet networks because they exhibit:
+1. generation semantics
+2. source symbol identity
+3. coded equation identity
+4. decoding semantics
 
-- Frame loss (dropped frames)
-- Decode failure instead of packet corruption
-- Realization-dependent decoding success (same data, different visual patterns → different success rates)
-- Absence of reliable feedback
-- Pattern-dependent failures due to blur, compression, sampling, color conversion
+This layer does **not** define frame timing, visual layout, or modulation.
 
-### 1.5 Design Philosophy
+### 2.2 Layer 2: Scheduling Layer
 
-OGRB addresses the limitations of frame-by-frame sequential transmission by:
+This layer defines **when** each `TransmissionUnit` is sent.
 
-1. Treating each frame as a lightweight symbol carrier
-2. Moving primary recovery responsibility from frame-internal ECC to cross-frame erasure coding
-3. Supporting mid-session join and continuous recovery through rateless coding
-4. Maintaining short revisit cycles through overlapping generations
-5. **NEW in v2**: Introducing visual realization diversity to mitigate pattern-dependent failures
+This is the OGRB layer. It decides:
 
-### 1.6 Why Not Whole-File Fountain Codes
+1. which generation is active
+2. how new and old generations are mixed
+3. when revisits occur
+4. how much redundancy is allocated
+5. whether overlapping generations are enabled
 
-OGRB deliberately avoids whole-file fountain coding because:
+This layer operates on `TransmissionUnit` objects only. It must not redefine their meaning.
 
-- Decoding complexity scales poorly with file size
-- Time-to-first-recovery is too long for interactive use
-- Revisit cycles become uncontrollable
-- Debugging and tuning complexity is excessive
+### 2.3 Layer 3: Visual Transport Layer
 
-Instead, OGRB uses small generations with limited overlap, providing:
+This layer defines **how** a `TransmissionUnit` is rendered to the screen and recovered from captured frames.
 
-- Fast per-generation recovery
-- Predictable revisit cycles
-- Manageable decoder complexity
-- Clear progress indicators
+This specification preserves the existing visual design directions:
 
-### 1.7 Deterministic Engineering First
+1. compact control header encoding
+2. layered header/payload separation
+3. gray4 visual modulation
+4. existing protocol adaptor abstraction
 
-The protocol is designed for **deterministic engineering first**, with optional ML augmentation later. Core mechanisms are based on well-understood coding theory and scheduling heuristics, while ML components are isolated in optional policy layers.
+This layer is semantics-agnostic. It transports `TransmissionUnit` objects but does not define whether a payload is a source symbol or a coded equation.
 
----
+### 2.4 Layer Relation
 
-## 2. Normative Language
+The relation between the layers is:
 
-This specification uses RFC 2119 terminology:
+1. Information layer defines the units.
+2. OGRB schedules those units.
+3. Visual transport carries those units.
 
-- **MUST**: Absolute requirement
-- **MUST NOT**: Absolute prohibition
-- **SHOULD**: Recommended unless valid reason exists
-- **SHOULD NOT**: Not recommended unless valid reason exists
-- **MAY**: Optional
+Explicitly:
 
----
+1. erasure coding is not a subset of OGRB
+2. OGRB depends on information units that are suitable for erasure recovery
+3. the visual layer is below both and must not invent protocol semantics
 
-## 3. Architecture
+## 3. Channel Model & Robustness Assumptions
 
-### 3.1 Five-Layer Structure
+Screen-Airdrop does not run on an ideal packet channel. It runs on a visual channel with asynchronous sampling and display composition.
 
-OGRB v2 is structured as five independent layers that MUST be kept separate:
+Typical path:
 
-```
-Layer 0  Physical Frame Layer
-Layer 1  Realization Layer (NEW in v2)
-Layer 2  Generation Coding Layer
-Layer 3  Broadcast Scheduling Layer
-Layer 4  Policy Layer (NEW in v2, optional ML)
+```text
+sender renderer -> local compositor -> remote desktop / video compression
+-> receiver screen capture -> frame decode
 ```
 
-Each layer is designed to evolve independently.
+### 3.1 Real-World Failure Modes
 
-#### Layer 0: Physical Frame Layer
+The channel may exhibit:
 
-**Responsibilities:**
-- Frame capture from visual channel
-- ROI (Region of Interest) extraction
-- Header decode
-- Payload decode
-- CRC validation
-- Deliver payload if trustworthy
-- Treat bad frames as erasures
+1. tearing
+   The captured image contains a mixture of two rendered frames.
+2. frame skip / drop
+   A displayed frame is never captured or never successfully decoded.
+3. asynchronous capture
+   Capture occurs at arbitrary times relative to sender frame boundaries.
+4. decode failure
+   Header or payload cannot be decoded reliably.
 
-**Outputs:**
-```
-decoded symbol
-or
-symbol erasure
-```
+### 3.2 Required Abstraction
 
-**Non-responsibilities:**
-- Cross-generation recovery
-- Broadcast scheduling
-- Global file completion judgment
-- Protocol-level recovery logic
+All channel failures must be mapped to the same abstract outcome:
 
-**Important**: This layer MUST NOT attempt protocol recovery.
+**ERASURE**
 
-#### Layer 1: Realization Layer (NEW in v2)
+That means:
 
-**Purpose**: Introduces **visual diversity** to combat pattern-dependent decode failures.
+1. a valid frame yields exactly one valid `TransmissionUnit`
+2. an invalid frame yields no `TransmissionUnit`
+3. corrupted frames must never partially update decoder state
 
-**Concept**: A single logical symbol may be transmitted using multiple visual realizations.
+### 3.3 Strong Receiver Rule
 
-**Responsibilities:**
-- Generate multiple visual representations of the same logical symbol
-- Apply diversity mechanisms (mask divergence, permutation, whitening)
-- Track realization metadata
+A frame must either be fully accepted as a valid `TransmissionUnit` or completely discarded as an erasure. It must not partially influence system state.
 
-**Example realizations:**
-```
-mask divergence
-symbol permutation
-spatial tile permutation
-payload whitening
-```
+Consequences:
 
-**Goal**: Reduce pattern-dependent decode failures by providing alternative visual representations.
+1. corrupted headers must be discarded immediately
+2. invalid payloads must be discarded immediately
+3. partial payload reuse is forbidden
+4. invalid frames must not participate in deduplication
+5. invalid frames must not create generation state
 
-#### Layer 2: Generation Coding Layer
+### 3.4 Robustness Strategy
 
-**Responsibilities:**
-- Partition source data into small generations
-- Source symbol partitioning
-- Systematic symbol generation
-- Coded symbol generation (XOR combinations)
-- Maintain independent recovery state per generation
-- Determine when a generation can be recovered
-- Generation decoding
+Robustness is achieved by converting all channel errors into erasures and relying on erasure coding for recovery.
 
-**Non-responsibilities:**
-- Assume any specific frame must arrive
-- Depend on visible epoch boundaries
-- Depend on specific realization success
+This is the central protocol assumption.
 
-#### Layer 3: Broadcast Scheduling Layer
+The visual layer may use CRC, ECC, geometry checks, or confidence thresholds to classify frames as valid or invalid. But once a frame is classified invalid, it is an erasure, not a degraded symbol.
 
-**Responsibilities:**
-- Decide which generation to transmit
-- Choose between systematic and coded symbols
-- Allocate airtime between old and new generations
-- **NEW in v2**: Select realization for each transmission
-- **NEW in v2**: Schedule diversity across realizations
+## 4. Information Layer (Generation + Erasure Coding)
 
-**Non-responsibilities:**
-- Frame-level encoding details
-- Symbol-level error correction
-- Realization generation logic
+This layer defines the semantic transmission objects.
 
-#### Layer 4: Policy Layer (NEW in v2, Optional)
+### 4.1 Terminology
 
-**Purpose**: Allows adaptive control of protocol parameters.
+Use these terms consistently:
 
-**Possible implementations:**
-```
-static heuristics
-adaptive algorithms
-ML policy networks
-```
+1. `source symbol`
+   A fixed-size chunk of original source data.
+2. `coded equation`
+   A linear equation over source symbols of one generation.
+3. `TransmissionUnit`
+   The semantic object carried by the visual layer.
+4. `frame`
+   A visual transport container. A frame carries one `TransmissionUnit`.
 
-**The policy layer may adjust:**
-```
-realization selection
-redundancy level
-generation scheduling
-mask policy
-systematic vs coded ratio
+Do not use `symbol`, `unit`, and `frame` interchangeably.
+
+### 4.2 Generation Model
+
+Source data is partitioned into generations.
+
+Each generation has:
+
+1. `generation_id`
+2. `generation_size = K`
+3. ordered source symbols with local indices `0 .. K-1`
+
+Generation completion means:
+
+1. all source symbols of that generation are known
+2. therefore the generation can be materialized as ordered source bytes
+
+Symbol Size Invariant:
+
+All source symbols within a generation MUST have the same fixed size.
+
+For every `TransmissionUnit` in a generation:
+
+```text
+payload_size MUST equal symbol_size
 ```
 
-**Examples of ML-driven control:**
-- Symbol classifier confidence → realization selection
-- Header classifier → mask policy adjustment
-- Channel quality estimator → redundancy tuning
-- Generation completion predictor → scheduling policy
+Variable payload sizes within a generation are not supported unless explicitly specified by a future extension.
 
-**Important**: This layer operates **above the protocol layer** and is entirely optional.
+### 4.3 TransmissionUnit
 
-### 3.2 Layer Separation Requirements
-
-Implementations MUST maintain clear boundaries:
-
-1. Physical frame layer MUST NOT perform cross-generation recovery
-2. Realization layer MUST NOT make scheduling decisions
-3. Generation coding layer MUST NOT depend on specific frame arrival or realization success
-4. Broadcast scheduling layer MUST NOT mix with frame encoding logic
-5. Policy layer MUST NOT bypass protocol invariants
-
----
-
-## 4. Core Concepts
-
-### 4.1 Source Symbol
-
-**Definition**: A fixed-size unit of original data.
-
-**Default Size**: 512 bytes
-
-Source data is partitioned into fixed-size symbols. The last symbol is padded if necessary.
-
-### 4.2 Logical Symbol
-
-**Definition**: A logical symbol represents a source symbol within a generation context.
-
-**Key Property**: A logical symbol may appear multiple times through different realizations.
-
-**Example**:
-```
-Logical symbol 12 in generation 0
-  → may be transmitted as realization 0 (mask A)
-  → may be transmitted as realization 1 (mask B)
-  → may be transmitted as realization 2 (mask C)
+```text
+TransmissionUnit =
+    SystematicUnit
+  | CodedUnit
 ```
 
-Receiver only requires **one successful decode** of any realization.
+#### 4.3.1 SystematicUnit
 
-### 4.3 Realization (NEW in v2)
+Represents one source symbol.
 
-**Definition**: A realization is a specific visual representation of a logical symbol.
+Fields:
 
-**Purpose**: Combat pattern-dependent decode failures by providing visual diversity.
+1. `unit_type = SYSTEMATIC`
+2. `generation_id`
+3. `generation_size`
+4. `source_index`
+5. `payload`
 
-**Mechanism**: Same logical symbol data, different visual encoding parameters.
+Identity:
 
-**Example diversity mechanisms**:
-- **Mask divergence**: Different finder pattern masks
-- **Symbol permutation**: Reorder data bits before encoding
-- **Spatial tile permutation**: Rearrange spatial layout
-- **Payload whitening**: XOR with different PRNG sequences
-
-**Parameter**:
-```
-realization_count = D
+```text
+(generation_id, source_index)
 ```
 
-**Typical values**:
-```
-D = 1   (diversity disabled, v1 behavior)
-D = 2   (two realizations per symbol)
-D = 3   (three realizations per symbol)
-```
+#### 4.3.2 CodedUnit
 
-**Receiver behavior**: Accept first successful decode, ignore later duplicates.
+Represents one coded equation over source symbols in one generation.
 
-### 4.4 Systematic Symbol
+Fields:
 
-**Definition**: A source symbol transmitted without encoding (direct copy of source data).
+1. `unit_type = CODED`
+2. `generation_id`
+3. `generation_size`
+4. `equation_id`
+5. `coding_seed` or explicit coefficient description
+6. `degree`
+7. `payload`
 
-**Purpose**:
-- Reduce latency for early symbols
-- Improve decode probability when few symbols received
-- Better for receiver sparse sampling scenarios
+Identity:
 
-### 4.5 Coded Symbol
-
-**Definition**: A linear combination (XOR) of multiple source symbols within a generation.
-
-**Generation**: Created by XORing `degree` source symbols selected via PRNG seed.
-
-**Typical degree range**: 2-8 for generation sizes 12-32
-
-### 4.6 Generation
-
-**Definition**: A group of consecutive source symbols that can be independently recovered.
-
-**Parameter**: `generation_size = K`
-
-**Key Properties**:
-- Independent decoding unit
-- Contains K source symbols
-- Can be recovered when sufficient symbols (systematic + coded) are received
-- Decoding uses rateless coding (fountain code principles)
-
-### 4.7 Overlapping Generations
-
-**Definition**: Consecutive generations share some symbols in their symbol ranges.
-
-**Parameter**: `generation_overlap = α` (fraction, 0.0 to 0.5)
-
-**Example** (K=20, α=0.25, step=15):
-```
-Generation 0: symbols [0, 19]
-Generation 1: symbols [15, 34]   (overlap: [15, 19])
-Generation 2: symbols [30, 49]   (overlap: [30, 34])
+```text
+(generation_id, equation_id)
 ```
 
-**Purpose**:
-- Provides secondary recovery paths
-- Increases revisit opportunities for nearly-complete generations
-- Allows symbols to be recovered through multiple generation contexts
+### 4.4 Identity Rules
 
-**Trade-off**: Overlap increases recovery robustness but reduces forward progress speed.
+The receiver must maintain two separate identity spaces:
 
-### 4.8 Symbol Types in Transmission
+1. `received_source_ids`
+2. `received_equation_ids`
 
-Each transmitted frame carries either:
-- A **systematic symbol** (direct copy of source data)
-- A **coded symbol** (XOR combination of multiple source symbols)
+They must never be merged.
 
-Frame also specifies:
-- **realization_id** (NEW in v2): Which visual realization is used
+Specifically:
 
----
+1. `source_index` exists only for `SYSTEMATIC`
+2. `equation_id` exists only for `CODED`
+3. a coded equation is not a source symbol
+4. a coded equation does not occupy `source_index`
 
-## 5. Realization Diversity (NEW in v2)
+The old idea of a universal `symbol_index` for all transmitted objects is invalid and must not be used.
 
-### 5.1 Motivation
+Equation Identity Rule:
 
-Experiments show decoding success can depend on visual pattern realization.
+For `CODED` units, `equation_id` MUST uniquely identify the equation content within a given `(session_id, generation_id)`.
 
-**Observed phenomena**:
-- Same data with different visual patterns → different decode success rates
-- Failures may occur because patterns interact poorly with:
-  - Blur (Gaussian, motion)
-  - Compression (JPEG, H.264, H.265)
-  - Sampling (subpixel alignment, Moiré patterns)
-  - Color conversion (RGB ↔ YUV)
+Two `CODED` units that correspond to the same equation, that is, the same generation, the same coefficient set, and the same coding parameters, MUST use the same `equation_id`.
 
-**Solution**: Realization diversity mitigates this effect by providing multiple visual representations of the same logical symbol.
+Different `equation_id` values MUST correspond to different equations.
 
-### 5.2 Diversity Mechanisms
+Sender implementations MUST ensure that repeated transmission of the same coded equation, including different visual realizations, preserves `equation_id`.
 
-#### 5.2.1 Mask Divergence
+Receiver implementations MUST use `(generation_id, equation_id)` as the sole identity key for coded equation deduplication.
 
-**Concept**: Use different finder pattern masks for different realizations.
+### 4.5 Coded vs Systematic Semantics
 
-**Example**:
-```
-Realization 0: mask pattern A
-Realization 1: mask pattern B
-Realization 2: mask pattern C
+`SYSTEMATIC` units are direct values of variables.
+
+`CODED` units are constraints over variables.
+
+In algebraic terms:
+
+1. systematic symbol:
+
+```text
+x_i = payload
 ```
 
-**Benefit**: Reduces correlation between compression artifacts and specific mask patterns.
+2. coded equation:
 
-#### 5.2.2 Symbol Permutation
-
-**Concept**: Reorder data bits before encoding to visual symbols.
-
-**Example**:
-```
-Original bits: [b0, b1, b2, ..., b511]
-Realization 0: [b0, b1, b2, ..., b511]
-Realization 1: [b127, b0, b255, ..., b384]
-Realization 2: [b255, b128, b1, ..., b256]
+```text
+a_0*x_0 + a_1*x_1 + ... + a_(K-1)*x_(K-1) = payload
 ```
 
-**Benefit**: Spreads burst errors across different bit positions.
+For XOR-based coding over GF(2^8), coefficients are often binary selection indicators and the operation is XOR.
 
-#### 5.2.3 Spatial Tile Permutation
+The critical rule is:
 
-**Concept**: Rearrange spatial layout of symbol tiles.
+**coded equations are not source symbols**
 
-**Example**:
-```
-Realization 0: standard grid order
-Realization 1: checkerboard permutation
-Realization 2: spiral permutation
-```
+### 4.6 Equation Representation
 
-**Benefit**: Reduces correlation between spatial compression blocks and symbol boundaries.
+An implementation may represent a coded equation as:
 
-#### 5.2.4 Payload Whitening
-
-**Concept**: XOR payload with different PRNG sequences.
-
-**Example**:
-```
-Realization 0: payload ⊕ PRNG(seed=0)
-Realization 1: payload ⊕ PRNG(seed=1)
-Realization 2: payload ⊕ PRNG(seed=2)
+```text
+equation_id
+generation_id
+generation_size
+coefficient_set
+rhs_payload
 ```
 
-**Benefit**: Breaks correlation between payload bit patterns and compression behavior.
+Where:
 
-### 5.3 Diversity Parameter
+1. `coefficient_set` may be generated from `coding_seed`
+2. `rhs_payload` is the coded payload bytes
 
-**Parameter**: `realization_count = D`
+The protocol requires that the receiver be able to reconstruct the same equation deterministically from the metadata.
 
-**Recommended values**:
-```
-D = 1   Diversity disabled (v1 behavior)
-        Use when: channel is very clean, throughput is critical
+### 4.7 Decoder State Model
 
-D = 2   Light diversity
-        Use when: moderate pattern-dependent failures observed
+For each generation, the receiver maintains:
 
-D = 3   Strong diversity
-        Use when: high pattern-dependent failure rate
-```
+1. `systematic_symbols: Dict[source_index, payload]`
+2. `coded_equations: Dict[equation_id, Equation]`
+3. `generation_size`
+4. `decode_complete`
 
-**Trade-off**: Higher D increases airtime cost (more transmissions per logical symbol) but improves recovery probability for problematic symbols.
-
-### 5.4 Realization Scheduling
-
-**Question**: When should different realizations be transmitted?
-
-**Strategies**:
-
-1. **Round-robin**: Cycle through realizations sequentially
-2. **Adaptive**: Prioritize realizations with higher historical success rates
-3. **ML-driven**: Use policy network to select realization based on channel state
-
-**Default recommendation**: Round-robin for deterministic behavior.
-
-### 5.5 Receiver Realization Handling
-
-**Rule**: Receiver accepts **first successful decode** of a logical symbol, ignores later duplicates.
-
-**State tracking**:
-```python
-known_symbols: Set[int]  # logical symbol indices
-
-if symbol_index in known_symbols:
-    # Already have this symbol, ignore
-    return
-else:
-    # New symbol, accept and add to generation state
-    known_symbols.add(symbol_index)
-```
-
-**Important**: Receiver does NOT need to track which realization succeeded, only that the logical symbol was recovered.
-
-### 5.6 Future ML-Assisted Mechanisms
-
-Future versions MAY include:
-- ML-selected realizations based on channel quality estimator
-- Adaptive modulation (different symbol densities per realization)
-- Confidence-based realization prioritization
-
----
-
-## 6. Parameters
-
-### 6.1 Core Parameters
-
-| Parameter | Symbol | Type | Description |
-|-----------|--------|------|-------------|
-| Symbol Size | `S` | bytes | Size of each source symbol |
-| Generation Size | `K` | count | Number of symbols per generation |
-| Generation Overlap | `α` | fraction | Overlap between consecutive generations |
-| Systematic Prefix | `P` | count | Number of systematic symbols sent first |
-| Coded Redundancy | `R` | ratio | Total symbols sent / generation size |
-| **Realization Count** | `D` | count | **NEW in v2**: Number of visual realizations per symbol |
-| Max Active Generations | `G` | count | Maximum concurrent active generations |
-| Old/New Ratio | `β` | ratio | Airtime bias toward older generations |
-| Decode Margin | `M` | count | Extra symbols required before decode attempt |
-
-### 6.2 Derived Parameters
-
-**Step Size** (symbols advanced per generation):
-```
-step_size = K × (1 - α)
-```
-
-**Total Symbols per Generation**:
-```
-total_symbols = K × R
-```
-
-**Coded Symbols per Generation**:
-```
-coded_symbols = K × R - P
-```
-
-**Effective Airtime Cost** (NEW in v2, with diversity):
-```
-effective_transmissions = total_symbols × D
-```
-
-### 6.3 Default Parameters
-
-If not otherwise specified, implementations SHOULD start from these values:
-
-```
-symbol_size = 512 bytes
-generation_size = 20~24
-generation_overlap = 0.125~0.25
-systematic_prefix = 6~8
-coded_redundancy = 1.15~1.25
-realization_count = 1~2          # NEW in v2
-max_active_generations = 2
-old_new_ratio = 1.5
-decode_margin = 1
-```
-
-### 6.4 Rationale
-
-These defaults represent a **balanced** profile suitable for:
-- Local screen capture scenarios
-- Limited capture FPS (10-18 fps)
-- Moderate packet loss (5-15%)
-- Trade-off between throughput and robustness
-
----
-
-## 7. Frame Model
-
-### 7.1 Frame Structure
-
-Each transmitted frame carries **one symbol realization**.
-
-**Frame contents**:
-```
-header
-  ├─ session_id
-  ├─ generation_id
-  ├─ generation_start
-  ├─ generation_size
-  ├─ symbol_size
-  ├─ symbol_type (SYSTEMATIC or CODED)
-  ├─ symbol_index (for systematic)
-  ├─ realization_id (NEW in v2)
-  ├─ coding_seed (for coded)
-  ├─ degree (for coded)
-  ├─ header_crc
-  └─ payload_crc
-payload
-  └─ symbol data (S bytes)
-```
-
-**Symbol types**:
-```
-SYSTEMATIC  (type=0)
-CODED       (type=1)
-```
-
-### 7.2 Frame Header Format
-
-#### 7.2.1 Required Header Fields
-
-OGRB frame headers SHOULD include at minimum:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `session_id` | uint32 | Unique identifier for this transmission session |
-| `generation_id` | uint32 | Sequential generation number |
-| `generation_start` | uint32 | Global symbol index where this generation starts |
-| `generation_size` | uint16 | Number of symbols in this generation (K) |
-| `symbol_size` | uint16 | Size of each symbol in bytes |
-| `symbol_type` | uint8 | 0=systematic, 1=coded |
-| `symbol_index` | uint16 | Index within generation (valid for systematic) |
-| **`realization_id`** | **uint8** | **NEW in v2**: Realization index (0 to D-1) |
-| `coding_seed` | uint32 | PRNG seed for coded symbol (valid for coded) |
-| `degree` | uint8 | Number of source symbols XORed (valid for coded) |
-| `header_crc` | uint16 | CRC-16 of header fields |
-| `payload_crc` | uint16 | CRC-16 of payload data |
-
-#### 7.2.2 Header Design Requirements
-
-1. **Generation Attribution**: Generation membership MUST be explicitly visible
-2. **Symbol Type Distinction**: Systematic vs coded MUST be unambiguous
-3. **Realization Identification** (NEW in v2): Realization ID MUST be present
-4. **Separate Validation**: Header and payload validity MUST be independently checkable
-5. **Compact Encoding**: Header SHOULD fit within control plane capacity
-
-#### 7.2.3 Header vs Payload Validation
-
-Implementations MUST support independent validation:
-
-- **Header Valid, Payload Invalid**: Treat as erasure, count for statistics
-- **Header Invalid**: Discard frame immediately, do not attempt payload decode
-- **Both Valid**: Accept symbol for generation recovery
-
----
-
-## 8. Sender Algorithm
-
-### 8.1 Initialization
-
-**Input**: Source file or data stream
-
-**Steps**:
-1. Partition data into fixed-size source symbols (pad last symbol if needed)
-2. Assign sequential global symbol indices: `0, 1, 2, ..., N-1`
-3. Initialize generation scheduler with configured parameters
-4. **NEW in v2**: Initialize realization generator with diversity parameters
-
-### 8.2 Generation Partitioning
-
-**Generation Boundaries**:
-
-For generation `g` with size `K` and overlap `α`:
-
-```
-step = K × (1 - α)
-start[g] = g × step
-end[g] = start[g] + K - 1
-```
-
-**Example** (K=20, α=0.25, step=15):
-```
-Generation 0: symbols [0, 19]
-Generation 1: symbols [15, 34]
-Generation 2: symbols [30, 49]
-...
-```
-
-### 8.3 Symbol Transmission Sequence
-
-For each generation `g`:
-
-1. **Systematic Phase**: Send `P` systematic symbols
-   - Typically send first `P` symbols of the generation
-   - Or distribute evenly across generation range
-   - **NEW in v2**: Each systematic symbol may be sent with multiple realizations
-
-2. **Coded Phase**: Generate and send coded symbols until:
-   - Total symbols sent reaches `K × R`
-   - Or scheduler switches to different generation
-   - **NEW in v2**: Each coded symbol may be sent with multiple realizations
-
-### 8.4 Coded Symbol Generation
-
-**Algorithm**:
+The receiver must not use a single set such as:
 
 ```python
-def generate_coded_symbol(generation_symbols, seed, degree):
-    """
-    generation_symbols: list of K source symbols
-    seed: uint32 PRNG seed
-    degree: number of symbols to XOR (typically 2-8)
-    """
-    rng = PRNG(seed)
-    indices = rng.sample(range(len(generation_symbols)), degree)
-
-    result = bytearray(symbol_size)
-    for idx in indices:
-        xor_into(result, generation_symbols[idx])
-
-    return result, indices
+known_symbols: Set[int]
 ```
 
-**Degree Selection**:
-- SHOULD use Robust Soliton distribution or similar
-- Typical range: 2-8 for generation sizes 12-32
-- Higher degrees provide better mixing but increase decode complexity
+as the primary semantic state.
 
-### 8.5 Realization Generation (NEW in v2)
-
-**Algorithm**:
+The correct model is:
 
 ```python
-def generate_realization(symbol_data, realization_id, mechanism):
-    """
-    symbol_data: original symbol bytes
-    realization_id: 0 to D-1
-    mechanism: diversity mechanism to apply
-    """
-    if mechanism == "mask_divergence":
-        return apply_mask_divergence(symbol_data, realization_id)
-    elif mechanism == "symbol_permutation":
-        return apply_permutation(symbol_data, realization_id)
-    elif mechanism == "payload_whitening":
-        return apply_whitening(symbol_data, realization_id)
-    elif mechanism == "spatial_permutation":
-        return apply_spatial_permutation(symbol_data, realization_id)
+systematic_symbols: Dict[int, bytes]
+coded_equations: Dict[int, Equation]
+received_source_ids: Set[tuple[int, int]]
+received_equation_ids: Set[tuple[int, int]]
+```
+
+### 4.8 Receiver Acceptance Logic
+
+Pseudocode:
+
+```python
+def accept_unit(unit):
+    gen = state.get_or_create_generation(unit.generation_id, unit.generation_size)
+
+    if unit.unit_type == SYSTEMATIC:
+        sid = (unit.generation_id, unit.source_index)
+        if sid in gen.received_source_ids:
+            return DUPLICATE
+        gen.received_source_ids.add(sid)
+        gen.systematic_symbols[unit.source_index] = unit.payload
+        return ACCEPTED
+
+    if unit.unit_type == CODED:
+        eid = (unit.generation_id, unit.equation_id)
+        if eid in gen.received_equation_ids:
+            return DUPLICATE
+        gen.received_equation_ids.add(eid)
+        gen.coded_equations[unit.equation_id] = build_equation(unit)
+        return ACCEPTED
+
+    raise ProtocolError("unknown unit type")
+```
+
+## 5. Scheduling Layer (OGRB)
+
+OGRB is the scheduling layer. It operates over `TransmissionUnit` objects. It does not define symbol semantics.
+
+### 5.1 Scheduling Goals
+
+OGRB exists to balance:
+
+1. forward progress into new data
+2. revisit pressure for incomplete generations
+3. bounded decoding latency
+4. tolerance to erasures without feedback
+
+### 5.2 Active Generations
+
+The sender maintains an active generation set.
+
+Each active generation may emit:
+
+1. systematic units
+2. coded units
+
+The scheduler chooses among active generations based on policy.
+
+### 5.3 New vs Old Generation Mixing
+
+The scheduler may allocate airtime differently to:
+
+1. new generations
+2. old incomplete generations
+
+Typical policy knob:
+
+```text
+old_new_ratio = airtime(old generations) / airtime(new generations)
+```
+
+This controls revisit pressure without changing information semantics.
+
+### 5.4 Revisit Cycles
+
+A revisit cycle is the time between useful opportunities for an incomplete generation to receive another `TransmissionUnit`.
+
+OGRB must be specified in terms of units, not frames.
+
+Correct statement:
+
+```text
+OGRB schedules TransmissionUnit emission opportunities for generations.
+```
+
+Incorrect statement:
+
+```text
+OGRB schedules frames directly.
+```
+
+Frames are visual carriers selected later by the transport layer.
+
+### 5.5 Overlap
+
+Generation overlap is optional and applies only to the scheduling/information boundary.
+
+If overlap is enabled:
+
+1. consecutive generations share some source symbols
+2. those symbols may be recoverable through more than one generation context
+
+Overlap improves robustness but increases schedule complexity and can reduce net forward progress.
+
+### 5.6 Redundancy Allocation
+
+The scheduler may allocate redundancy by:
+
+1. increasing systematic retransmission frequency
+2. increasing coded equation emission rate
+3. favoring old generations longer
+4. increasing overlap
+
+This is an OGRB concern. It does not redefine what a coded equation means.
+
+### 5.7 OGRB Scheduling Skeleton
+
+Pseudocode:
+
+```python
+def next_transmission(active_generations, policy):
+    gen = policy.select_generation(active_generations)
+
+    if policy.should_send_systematic(gen):
+        unit = gen.next_systematic_unit()
     else:
-        return symbol_data  # no diversity
+        unit = gen.next_coded_unit()
+
+    return unit
 ```
 
-**Mechanism Selection**:
-- MAY use single mechanism or combination
-- SHOULD be deterministic given realization_id
-- MUST be reversible at receiver (or receiver-agnostic)
+If overlap is enabled, generation construction decides membership. OGRB only schedules the resulting units.
 
-### 8.6 Broadcast Scheduler
+## 6. Visual Transport Layer
 
-**Active Generation Set**:
+This layer carries `TransmissionUnit` objects over a screen-render/capture channel.
 
-Maintain up to `G` active generations (default: 2)
+It is explicitly semantics-agnostic.
 
-**Airtime Allocation**:
+### 6.1 Responsibilities
 
-For each frame to transmit:
+The visual transport layer is responsible for:
 
-1. Select generation `g` from active set with probability:
-   ```
-   P(g) ∝ β^(current_gen - g)
-   ```
-   where `β` is old/new ratio (default: 1.5)
+1. rendering unit metadata and payload into a visual frame
+2. preserving sync and locator structures
+3. recovering metadata and payload from captured images
+4. validating that a frame is trustworthy enough to yield exactly one `TransmissionUnit`
 
-2. If generation `g` has sent < `P` systematic symbols:
-   - Select next systematic symbol
-3. Else:
-   - Generate coded symbol
+It is not responsible for:
 
-4. **NEW in v2**: Select realization `r` for this transmission:
-   - Round-robin: `r = transmission_count % D`
-   - Or adaptive/ML-driven selection
+1. generation completion
+2. equation solving
+3. OGRB scheduling
+4. deciding whether a unit is systematic or coded in a semantic sense beyond the header field
 
-5. Generate frame with selected (generation, symbol, realization)
+Transport Semantics Boundary:
 
-**Generation Advancement**:
+The transport layer carries information-layer metadata fields, such as `generation_id`, `source_index`, `equation_id`, and coding parameters, but MUST NOT interpret, modify, or redefine their semantics.
 
-Advance to new generation when:
-- Current generation has sent `K × R × D` total transmissions (with diversity)
-- Or timeout threshold reached (optional)
+All semantic meaning of these fields is defined exclusively by the information layer.
 
-### 8.7 Diversity Scheduling (NEW in v2)
+### 6.2 Existing Screen-Airdrop Design Decisions to Preserve
 
-**Question**: How to schedule realizations across transmissions?
+The following are part of the current design and remain valid:
 
-**Strategy 1: Round-Robin** (recommended default)
-```python
-for each symbol transmission:
-    realization_id = transmission_count % realization_count
+1. compact control header encoding
+2. gray4 modulation as a supported visual encoding mode
+3. layered rendering, where header/control information and payload information are visually separated
+4. protocol adaptor abstraction, so multiple visual encodings can carry the same `TransmissionUnit`
+
+### 6.3 Layered Rendering
+
+Layered rendering is preserved.
+
+The meaning is:
+
+1. a frame has a control/header region or control/header layer
+2. a frame has a payload-bearing region or payload layer
+3. header recovery should fail closed
+4. payload is interpreted only after header validation succeeds
+
+This separation is transport-level. It must not redefine the meaning of systematic versus coded units.
+
+### 6.4 Compact Encoding
+
+Compact encoding is the preferred header transport when control metadata must be kept small and robust.
+
+It should carry:
+
+1. unit type
+2. generation metadata
+3. unit identity metadata
+4. coding metadata for coded units
+5. checksums / CRC
+
+### 6.5 Gray4 Modulation
+
+Gray4 is a transport modulation choice.
+
+It affects:
+
+1. visual density
+2. symbol raster layout
+3. decode sensitivity to blur/compression
+
+It does not affect:
+
+1. `TransmissionUnit` identity rules
+2. generation semantics
+3. OGRB scheduling
+
+### 6.6 Transport Contract
+
+The transport contract is:
+
+```text
+Frame decode success -> exactly one TransmissionUnit
+Frame decode failure -> erasure
 ```
 
-**Strategy 2: Adaptive**
-```python
-# Track success rates per realization
-success_rate[r] = successful_decodes[r] / total_transmissions[r]
+No third outcome is allowed.
 
-# Prioritize realizations with lower success (need more coverage)
-realization_id = argmin(success_rate)
+## 7. Frame Format (updated header fields)
+
+Each visual frame carries exactly one `TransmissionUnit`.
+
+### 7.1 Required Header Fields
+
+The transport header must include at minimum:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `session_id` | uint32 | transmission session identifier |
+| `transport_frame_id` | uint64 | monotonic visual frame sequence |
+| `unit_type` | uint8 | `SYSTEMATIC` or `CODED` |
+| `generation_id` | uint32 | generation identifier |
+| `generation_size` | uint16 | K |
+| `payload_size` | uint16 | bytes carried in this unit |
+| `source_index` | uint16 or null | valid only for `SYSTEMATIC` |
+| `equation_id` | uint32 or null | valid only for `CODED` |
+| `coding_seed` | uint32 or null | valid only for `CODED` |
+| `degree` | uint8 or null | valid only for `CODED` |
+| `header_crc` | uint16/uint32 | integrity of header |
+| `payload_crc` | uint16/uint32 | integrity of payload |
+
+### 7.2 Header Semantics
+
+Rules:
+
+1. `source_index` must be present only when `unit_type == SYSTEMATIC`
+2. `equation_id` must be present only when `unit_type == CODED`
+3. `coding_seed` and `degree` must be present only when `unit_type == CODED`
+4. `source_index` and `equation_id` must never be overloaded into a single generic field
+
+### 7.3 Header Validation
+
+Receiver pipeline:
+
+1. recover header candidates
+2. validate `header_crc`
+3. reject the frame immediately if header is invalid
+4. recover payload only after header acceptance
+5. validate `payload_crc`
+6. yield `TransmissionUnit` only if both are valid
+
+### 7.4 Optional Visual Metadata
+
+The transport may include additional fields such as:
+
+1. adaptor version
+2. modulation mode
+3. layout profile
+4. realization identifier if visual diversity is added later
+
+These are transport concerns and must not replace the information-layer identifiers.
+
+## 8. Receiver Architecture
+
+The receiver must preserve the three-layer separation internally.
+
+### 8.1 Receiver Pipeline
+
+```text
+capture frame
+-> visual decode
+-> validate frame
+-> build TransmissionUnit or discard as erasure
+-> information-layer ingest
+-> generation state update
+-> generation decode attempt
 ```
 
-**Strategy 3: ML-Driven** (future)
+### 8.2 Visual Decode Stage
+
+The visual decode stage may use:
+
+1. layered header extraction
+2. compact header decoding
+3. gray4 symbol demodulation
+4. existing protocol adaptors
+
+Its output must be:
+
+1. valid `TransmissionUnit`
+2. or erasure
+
+### 8.3 Information-Layer Ingest
+
+The information-layer ingest stage must:
+
+1. route by `generation_id`
+2. split `SYSTEMATIC` and `CODED`
+3. track `received_source_ids`
+4. track `received_equation_ids`
+5. reject duplicates independently in each identity space
+
+### 8.4 State Model per Generation
+
 ```python
-# Policy network selects realization based on channel state
-realization_id = policy_network.select(channel_state)
+class GenerationState:
+    generation_id: int
+    generation_size: int
+    systematic_symbols: dict[int, bytes]
+    coded_equations: dict[int, Equation]
+    received_source_ids: set[tuple[int, int]]
+    received_equation_ids: set[tuple[int, int]]
+    decode_complete: bool
+    last_progress_ts: float
 ```
 
----
-
-## 9. Receiver Algorithm
-
-### 9.1 Frame Reception
-
-**Per-Frame Processing**:
-
-1. Capture frame from visual channel
-2. Decode header
-3. Validate `header_crc`
-   - If invalid: discard frame, increment `bad_header_count`
-4. Decode payload
-5. Validate `payload_crc`
-   - If invalid: treat as erasure, increment `bad_payload_count`
-6. If both valid: route symbol to generation decoder
-
-### 9.2 Realization Handling (NEW in v2)
-
-**Key Principle**: Receiver accepts **first successful decode** of a logical symbol.
-
-**Per-Symbol Processing**:
+### 8.5 Processing Logic
 
 ```python
-def process_symbol(generation_id, symbol_index, realization_id, payload):
-    """
-    Process a successfully decoded symbol.
-    """
-    gen_state = get_generation_state(generation_id)
-
-    # Check if we already have this logical symbol
-    if symbol_index in gen_state.known_symbols:
-        # Already have this symbol from a different realization
-        # Ignore this duplicate
-        gen_state.duplicate_count += 1
+def process_frame(frame):
+    unit = visual_transport_decode(frame)
+    if unit is ERASURE:
         return
 
-    # New symbol, accept it
-    gen_state.known_symbols.add(symbol_index)
-
-    if symbol_type == SYSTEMATIC:
-        gen_state.systematic_symbols[symbol_index] = payload
-    else:  # CODED
-        gen_state.coded_symbols.append(CodedSymbol(
-            seed=coding_seed,
-            degree=degree,
-            indices=indices,
-            payload=payload
-        ))
-
-    gen_state.last_progress_ts = current_time()
-
-    # Check if decode should be attempted
-    if should_attempt_decode(gen_state):
-        attempt_decode(gen_state)
+    result = information_layer_accept(unit)
+    if result in (ACCEPTED, DUPLICATE):
+        maybe_decode_generation(unit.generation_id)
 ```
 
-**Important**: Receiver does NOT need to track which realization succeeded, only that the logical symbol was recovered.
+Invalid frames do not enter deduplication, do not create partial state, and do not influence decode.
 
-### 9.3 Generation State
+## 9. Decoding Algorithms
 
-For each generation `g`, receiver MUST maintain:
+### 9.0 Decode Triggering
 
-| State Field | Type | Description |
-|-------------|------|-------------|
-| `known_symbols` | set[int] | **NEW in v2**: Logical symbol indices (realization-agnostic) |
-| `systematic_symbols` | dict[int, bytes] | Received systematic symbols |
-| `coded_symbols` | list[CodedSymbol] | Received coded symbols with metadata |
-| `decode_attempted` | bool | Whether decode has been tried |
-| `decode_completed` | bool | Whether generation is fully recovered |
-| `last_progress_ts` | timestamp | Last time new symbol was received |
-| `duplicate_count` | int | **NEW in v2**: Count of duplicate realizations received |
+The receiver MUST define when decoding attempts are performed.
 
-**CodedSymbol Structure**:
-```python
-@dataclass
-class CodedSymbol:
-    seed: int
-    degree: int
-    indices: list[int]  # which source symbols were XORed
-    payload: bytes
-```
+Baseline rule:
 
-### 9.4 Decode Triggering
+1. The receiver SHOULD attempt decoding after accepting any new information:
+   - a new `SYSTEMATIC` unit
+   - a new `CODED` unit
 
-**Decode Condition**:
+2. The receiver MAY throttle decode attempts:
+   - e.g., perform decode only every N accepted units
+   - or every T milliseconds
 
-Attempt decode when:
-```
-len(known_symbols) >= K + M
-```
+3. The receiver SHOULD skip decode if no new information has been accepted since the last attempt.
 
-where:
-- `known_symbols` is the set of **unique logical symbols** (realization-agnostic)
-- `M` is decode margin (default: 1)
+Decode triggering policy does not affect correctness, but strongly affects latency and computational cost.
 
-**Important Change from v1**: Count **logical symbols**, not individual transmissions. Multiple realizations of the same symbol count as one.
+### 9.1 Direct Completion
 
-**Decode Ordering** (SHOULD follow this priority):
-
-1. **Direct Recovery**: If all `K` systematic symbols received, output immediately
-2. **Lightweight Recovery**: Try peeling decoder or belief propagation
-3. **Gaussian Elimination**: Fallback to full matrix solve if needed
-
-**Important**: Receiver MUST NOT re-attempt decode on every new symbol. SHOULD only retry when:
-- New symbols arrive after previous decode failure
-- Sufficient additional symbols accumulated (e.g., +2 symbols)
-
-### 9.5 Decode Algorithms
-
-#### 9.5.1 Direct Recovery
-
-**Condition**: All K systematic symbols received
+If all systematic symbols are known:
 
 ```python
-def direct_recovery(gen_state):
-    if len(gen_state.systematic_symbols) == K:
-        # All systematic symbols present
-        return [gen_state.systematic_symbols[i] for i in range(K)]
-    return None
+if len(gen.systematic_symbols) == gen.generation_size:
+    return materialize_in_order(gen.systematic_symbols)
 ```
 
-**Complexity**: O(K)
+### 9.2 Peeling Decoding
 
-#### 9.5.2 Peeling Decoder
+Peeling decoding applies when equations are sparse.
 
-**Concept**: Iteratively resolve coded symbols with degree 1
+Representation:
 
 ```python
-def peeling_decoder(gen_state):
-    unknown = set(range(K)) - set(gen_state.systematic_symbols.keys())
-    resolved = dict(gen_state.systematic_symbols)
-
-    while True:
-        progress = False
-        for coded in gen_state.coded_symbols:
-            # Find coded symbols that XOR only unknown symbols
-            unknown_in_coded = [i for i in coded.indices if i in unknown]
-
-            if len(unknown_in_coded) == 1:
-                # Can resolve this symbol
-                idx = unknown_in_coded[0]
-                resolved[idx] = xor_resolve(coded, resolved)
-                unknown.remove(idx)
-                progress = True
-
-        if not progress:
-            break
-
-    if len(unknown) == 0:
-        return [resolved[i] for i in range(K)]
-    return None
+Equation:
+    variables: set[int]
+    rhs: bytes
 ```
 
-**Complexity**: O(K × C) where C is number of coded symbols
+Reduction rule:
 
-#### 9.5.3 Gaussian Elimination
+1. if some variables are already known, eliminate them from the equation
+2. if an equation has exactly one unknown variable left, solve it
+3. insert that solved symbol into `systematic_symbols`
+4. repeat until no progress is possible
 
-**Concept**: Solve linear system over GF(2)
+Pseudocode:
 
 ```python
-def gaussian_elimination(gen_state):
-    # Build matrix: each row is a coded symbol equation
-    # Augment with systematic symbols as trivial equations
-
-    matrix = build_coding_matrix(gen_state)
-    augmented = augment_with_payloads(matrix, gen_state)
-
-    # Gaussian elimination over GF(2)
-    rref = row_reduce_gf2(augmented)
-
-    if is_full_rank(rref):
-        return extract_solution(rref)
-    return None
-```
-
-**Complexity**: O(K³) worst case
-
-### 9.6 Symbol Output
-
-When generation `g` is successfully decoded:
-
-1. Mark `decode_completed = true`
-2. Output `K` source symbols in order
-3. Pass to reassembly layer
-4. Optionally: free generation state to reclaim memory
-
-### 9.7 Timeout and Cleanup
-
-Receiver SHOULD implement timeout for stalled generations:
-
-- If `current_time - last_progress_ts > timeout_threshold`:
-  - Mark generation as failed
-  - Report to upper layer
-  - Free resources
-
-**Recommended timeout**: 10-30 seconds depending on expected transmission rate
-
----
-
-## 10. Three Core Trade-offs
-
-### 10.1 Forward Progress
-
-**Definition**: How quickly new data enters the transmission
-
-**Controlled By**:
-- `generation_overlap` (α): Higher overlap → slower progress
-- `max_active_generations` (G): More active → slower per-generation progress
-- `old_new_ratio` (β): Higher ratio → more time on old generations
-- **NEW in v2**: `realization_count` (D): Higher D → slower progress (more airtime per symbol)
-
-**Question Answered**: Does sender keep moving forward or get stuck revisiting old data?
-
-### 10.2 Revisit Pressure
-
-**Definition**: How quickly old generations receive additional recovery opportunities
-
-**Controlled By**:
-- `generation_overlap` (α): Higher overlap → more revisit paths
-- `old_new_ratio` (β): Higher ratio → more frequent revisits
-- `max_active_generations` (G): More active → distributed revisit opportunities
-- **NEW in v2**: `realization_count` (D): Higher D → more recovery attempts per symbol
-
-**Question Answered**: If a generation is almost complete, how long until it gets another useful symbol?
-
-### 10.3 Recovery Robustness
-
-**Definition**: Probability that a generation completes successfully under packet loss and decode failures
-
-**Controlled By**:
-- `generation_size` (K): Smaller → faster completion, less loss exposure
-- `coded_redundancy` (R): Higher → more recovery capacity
-- `systematic_prefix` (P): Higher → faster startup, better for sparse sampling
-- `decode_margin` (M): Higher → more conservative decode triggering
-- **NEW in v2**: `realization_count` (D): Higher D → better robustness against pattern-dependent failures
-
-**Question Answered**: Will this generation complete or get stuck?
-
-### 10.4 Parameter Interaction
-
-These trade-offs are NOT independent:
-
-- Increasing overlap improves revisit pressure BUT reduces forward progress
-- Increasing redundancy improves robustness BUT reduces raw throughput
-- Increasing active generations distributes revisit BUT slows per-generation completion
-- **NEW in v2**: Increasing realization count improves robustness against pattern-dependent failures BUT reduces forward progress and increases airtime cost
-
-**Key Insight**: There is no single "optimal" parameter set. Choice depends on:
-- Sender FPS
-- Capture FPS
-- Packet loss rate
-- Pattern-dependent failure rate (NEW in v2)
-- Latency requirements
-
----
-
-## 11. Operating Profiles
-
-### 11.1 Profile Overview
-
-OGRB defines three standard profiles optimized for different scenarios. Implementations SHOULD support all three profiles and allow users to select via configuration.
-
-**NEW in v2**: Profiles now include `realization_count` parameter.
-
-### 11.2 Profile 1: Robust
-
-**Target Scenario**:
-- Remote server transmission
-- High packet loss (15-30%)
-- Low sender FPS (5-10 fps)
-- Recovery success rate is priority
-
-**Parameter Configuration**:
-
-```
-symbol_size = 512 bytes
-generation_size = 12~16 (recommended: 14)
-generation_overlap = 0.25
-systematic_prefix = 4
-coded_redundancy = 1.4~1.6 (recommended: 1.5)
-realization_count = 2~3 (recommended: 2)    # NEW in v2
-max_active_generations = 2
-old_new_ratio = 2.0~2.5 (recommended: 2.0)
-decode_margin = 2
-```
-
-**Characteristics**:
-
-- **Small generations**: Reduces time-to-completion, limits loss exposure
-- **High coded redundancy**: Prioritizes recovery success over raw throughput
-- **Strong old-generation bias**: Shortens tail latency for nearly-complete generations
-- **Moderate overlap (25%)**: Provides secondary recovery path without excessive cost
-- **NEW in v2**: **Light diversity (D=2)**: Mitigates pattern-dependent failures
-
-**Typical Performance**:
-- Generation size: ~7 KB
-- Step size: ~5.25 KB
-- Effective throughput: 50-65% of raw capacity (reduced due to diversity)
-- Recovery success rate: >95% under 20% loss + pattern-dependent failures
-
-**Design Rationale**:
-
-This profile prioritizes "complete this generation quickly" over "push forward aggressively". The old/new ratio of 2.0 means sender spends twice as much airtime on older generations, ensuring they complete before moving on. Diversity (D=2) provides fallback for problematic visual patterns.
-
-### 11.3 Profile 2: Balanced
-
-**Target Scenario**:
-- Local macOS screen capture
-- Moderate packet loss (5-15%)
-- Limited capture FPS (10-18 fps)
-- Balance between throughput and robustness
-
-**Parameter Configuration**:
-
-```
-symbol_size = 512 bytes
-generation_size = 20~24 (recommended: 22)
-generation_overlap = 0.125~0.25 (recommended: 0.125)
-systematic_prefix = 6~8 (recommended: 6)
-coded_redundancy = 1.15~1.25 (recommended: 1.2)
-realization_count = 1~2 (recommended: 1)    # NEW in v2
-max_active_generations = 2
-old_new_ratio = 1.5
-decode_margin = 1
-```
-
-**Characteristics**:
-
-- **Medium generations**: Avoids frequent generation switching overhead
-- **Low-to-medium overlap**: Maintains forward progress while providing limited revisit
-- **Higher systematic prefix**: Better for receiver sparse sampling scenarios
-- **Moderate redundancy**: Balances efficiency and recovery capability
-- **NEW in v2**: **Minimal diversity (D=1)**: Prioritizes throughput, assumes clean channel
-
-**Typical Performance**:
-- Generation size: ~11 KB
-- Step size: ~9.6 KB (at α=0.125)
-- Effective throughput: 75-85% of raw capacity
-- Recovery success rate: >90% under 10% loss
-
-**Design Rationale**:
-
-This profile is optimized for the common case where receiver does sparse sampling of sender's output stream. Higher systematic prefix ensures early symbols are more likely to be useful. Lower overlap (12.5%) prioritizes forward progress. Diversity disabled (D=1) for maximum throughput.
-
-### 11.4 Profile 3: Throughput
-
-**Target Scenario**:
-- Ideal environment
-- Very low packet loss (<5%)
-- High sender and capture FPS (>20 fps)
-- Maximum throughput is priority
-
-**Parameter Configuration**:
-
-```
-symbol_size = 512 bytes
-generation_size = 28~32 (recommended: 30)
-generation_overlap = 0 (no overlap)
-systematic_prefix = 8~12 (recommended: 10)
-coded_redundancy = 1.05~1.10 (recommended: 1.08)
-realization_count = 1 (diversity disabled)  # NEW in v2
-max_active_generations = 1
-old_new_ratio = 1.0 (no bias)
-decode_margin = 0
-```
-
-**Characteristics**:
-
-- **Large generations**: Maximizes net efficiency, reduces switching overhead
-- **Zero overlap**: Maximum forward progress speed
-- **Minimal redundancy**: Only essential protection
-- **Single active generation**: No airtime fragmentation
-- **NEW in v2**: **No diversity (D=1)**: Maximum throughput, assumes clean channel
-
-**Typical Performance**:
-- Generation size: ~15 KB
-- Step size: ~15 KB (no overlap)
-- Effective throughput: 90-95% of raw capacity
-- Recovery success rate: >85% under 5% loss
-
-**Design Rationale**:
-
-This profile sacrifices worst-case recovery experience for maximum raw throughput. It assumes the channel is clean enough that aggressive parameters won't cause frequent generation failures. No diversity overhead.
-
-### 11.5 Profile Selection Guidelines
-
-| Scenario | Sender FPS | Loss Rate | Pattern Failures | Capture FPS | Recommended Profile |
-|----------|-----------|-----------|------------------|-------------|---------------------|
-| Remote server | 5-10 | 15-30% | High | 10-15 | **Robust** (D=2) |
-| Local macOS | 15-25 | 5-15% | Low | 10-18 | **Balanced** (D=1) |
-| Ideal lab | >25 | <5% | None | >20 | **Throughput** (D=1) |
-| Unknown | Any | Unknown | Unknown | Any | **Balanced** (safe default) |
-
-**NEW in v2**: Pattern failure rate is now a consideration for profile selection.
-
-### 11.6 Profile Customization
-
-Users MAY override individual parameters while using a profile as baseline:
-
-```bash
-# Start from balanced, but increase redundancy
---ogrb-profile balanced --ogrb-coded-redundancy 1.4
-
-# Start from balanced, enable diversity
---ogrb-profile balanced --ogrb-realization-count 2
-```
-
-Implementations SHOULD validate that customized parameters remain internally consistent.
-
----
-
-## 12. Key Design Decisions
-
-### 12.1 Overlap is an Expensive Knob
-
-**Principle**: Overlap SHOULD NOT be the first parameter to increase in high-loss scenarios.
-
-**Rationale**:
-- Overlap directly reduces forward progress speed
-- Overlap increases airtime duplication cost
-- Other parameters (smaller generations, higher redundancy, stronger old-generation bias) often provide better loss tolerance per unit cost
-
-**Recommended Priority** (high loss scenarios):
-1. Reduce `generation_size`
-2. Increase `coded_redundancy`
-3. Increase `old_new_ratio` (bias toward old generations)
-4. **NEW in v2**: Increase `realization_count` (if pattern-dependent failures observed)
-5. Only then consider increasing `overlap`
-
-**Example**:
-
-Instead of:
-```
-generation_size = 24, overlap = 0.5, redundancy = 1.2, realization_count = 1
-```
-
-Prefer:
-```
-generation_size = 16, overlap = 0.25, redundancy = 1.5, realization_count = 2
-```
-
-### 12.2 Max Active Generations Default
-
-**Principle**: `max_active_generations = 2` SHOULD be the default.
-
-**Rationale**:
-- `G = 1`: Too aggressive, no revisit opportunity for stalled generations
-- `G = 2`: Balanced, allows one old generation to receive revisits while pushing forward
-- `G = 3`: Fragments airtime excessively, especially at low sender FPS
-
-**When to Use G=1**:
-- Ideal environment with very low loss
-- Throughput is absolute priority
-- Willing to accept occasional generation failures
-
-**When to Use G=3**:
-- Experimental scenarios only
-- NOT recommended as default robust configuration
-
-### 12.3 Systematic Prefix Strategy
-
-**Principle**: Higher systematic prefix is better for sparse sampling scenarios.
-
-**Rationale**:
-
-In local screen capture, receiver often samples sender's output stream sparsely (e.g., 12 fps capture vs 25 fps sender). Early systematic symbols have higher probability of being captured.
-
-**Recommended Values**:
-- Robust profile: 4 (lower, because redundancy is high anyway)
-- Balanced profile: 6-8 (higher, optimized for sparse sampling)
-- Throughput profile: 8-12 (highest, minimal coded overhead)
-
-### 12.4 Realization Count Strategy (NEW in v2)
-
-**Principle**: Enable diversity (D>1) only when pattern-dependent failures are observed.
-
-**Rationale**:
-- Diversity increases airtime cost proportionally (D=2 → 2× transmissions per symbol)
-- Diversity is most effective when failures are pattern-dependent, not random
-- Clean channels with random loss benefit more from redundancy than diversity
-
-**Recommended Values**:
-- D=1: Default for clean channels (local capture, low compression)
-- D=2: Moderate pattern-dependent failures (remote desktop, H.264 compression)
-- D=3: High pattern-dependent failures (aggressive compression, poor capture quality)
-
-**Diagnostic**: If increasing redundancy doesn't improve success rate, try increasing diversity instead.
-
-### 12.5 No Sender-Side Adaptation
-
-**Principle**: First version MUST use static profiles, NOT sender-side adaptation.
-
-**Rationale**:
-- Visual broadcast channel typically lacks reliable feedback path
-- Sender cannot reliably know:
-  - Actual packet loss rate
-  - Receiver decode progress
-  - Generation completion status
-  - Pattern-dependent failure rate (NEW in v2)
-- Static profiles with offline benchmarking are more predictable
-
-**Future Extension**:
-
-Sender-side adaptation MAY be added later if:
-- Reliable reverse control channel is established
-- Receiver can report generation completion status
-- Adaptation logic is thoroughly benchmarked
-- **NEW in v2**: Policy layer (Layer 4) provides ML-driven adaptation
-
----
-
-## 13. ML Integration (NEW in v2)
-
-### 13.1 ML-Assisted Decoding
-
-Machine learning may improve perception components at the **physical frame layer**.
-
-**Examples**:
-- Symbol classifier (improve decode accuracy)
-- Header classifier (improve header extraction)
-- Confidence estimator (predict decode success probability)
-- Pattern quality estimator (detect problematic visual patterns)
-
-**Important**: These operate **below the protocol layer** and do not change protocol semantics.
-
-**Integration Point**:
-```
-Physical Frame Layer (Layer 0)
-  ├─ Traditional decoder (baseline)
-  └─ ML-assisted decoder (optional enhancement)
-```
-
-### 13.2 ML-Driven Protocol Control
-
-Future systems may use ML to control protocol decisions via the **policy layer**.
-
-**Possible parameters controlled by policy**:
-- Mask selection
-- Realization scheduling
-- Redundancy strength (dynamic R adjustment)
-- Generation scheduling (dynamic β adjustment)
-- Diversity mechanism selection
-
-**Architecture**:
-```
-Policy Layer (Layer 4)
-  ├─ Static heuristics (baseline)
-  ├─ Adaptive algorithms (rule-based)
-  └─ ML policy networks (future)
-```
-
-**Example Policy Network**:
-```python
-class OGRBPolicy:
-    def select_realization(self, channel_state, symbol_history):
-        """
-        Select realization based on channel state.
-        """
-        features = extract_features(channel_state, symbol_history)
-        realization_id = self.policy_net(features)
-        return realization_id
-
-    def adjust_redundancy(self, generation_state):
-        """
-        Dynamically adjust redundancy based on generation progress.
-        """
-        features = extract_generation_features(generation_state)
-        redundancy_adjustment = self.redundancy_net(features)
-        return redundancy_adjustment
-```
-
-### 13.3 ML Training Data
-
-**Potential training signals**:
-- Decode success/failure per realization
-- Generation completion latency
-- Symbol-level decode confidence
-- Channel quality metrics (blur, compression artifacts)
-
-**Training objective**:
-- Maximize goodput
-- Minimize generation completion latency
-- Maximize generation success rate
-
-### 13.4 ML Deployment Considerations
-
-**Requirements for ML components**:
-1. MUST NOT violate protocol invariants
-2. MUST degrade gracefully to baseline when ML unavailable
-3. SHOULD be independently testable
-4. SHOULD provide interpretable decisions (for debugging)
-
-**Baseline requirement**: Protocol MUST work without ML components.
-
----
-
-## 14. Performance Metrics
-
-### 14.1 Required Metrics
-
-Implementations MUST track and report:
-
-**Sender Metrics**:
-- `frames_sent`: Total frames transmitted
-- `systematic_sent`: Count of systematic symbols sent
-- `coded_sent`: Count of coded symbols sent
-- `generations_started`: Number of generations entered
-- `generations_completed`: Number of generations fully transmitted
-- **NEW in v2**: `realizations_sent[r]`: Count per realization (r = 0 to D-1)
-
-**Receiver Metrics**:
-- `frames_received`: Total frames captured
-- `bad_header_count`: Frames with invalid header CRC
-- `bad_payload_count`: Frames with invalid payload CRC
-- `good_frames`: Frames with both header and payload valid
-- `generations_decoded`: Number of generations successfully recovered
-- `generations_failed`: Number of generations that timed out
-- **NEW in v2**: `duplicate_symbols`: Count of duplicate realizations received
-- **NEW in v2**: `realizations_decoded[r]`: Count per realization (r = 0 to D-1)
-
-### 14.2 Derived Metrics
-
-**Frame Success Rate**:
-```
-frame_success_rate = good_frames / frames_received
-```
-
-**Generation Success Rate**:
-```
-generation_success_rate = generations_decoded / generations_started
-```
-
-**Raw Throughput** (sender perspective):
-```
-raw_throughput = (frames_sent × symbol_size) / elapsed_time
-```
-
-**Goodput** (receiver perspective):
-```
-goodput = (generations_decoded × generation_size × symbol_size) / elapsed_time
-```
-
-**Effective Efficiency**:
-```
-efficiency = goodput / raw_throughput
-```
-
-**NEW in v2: Diversity Efficiency**:
-```
-diversity_efficiency = unique_symbols_decoded / total_symbols_received
-```
-
-**NEW in v2: Realization Success Rate**:
-```
-realization_success_rate[r] = realizations_decoded[r] / realizations_sent[r]
-```
-
-### 14.3 Benchmark Requirements
-
-When benchmarking OGRB implementations, reports SHOULD include:
-
-1. **Environment Description**:
-   - Sender FPS
-   - Capture FPS
-   - Simulated or measured loss rate
-   - **NEW in v2**: Pattern-dependent failure characteristics
-   - Test duration
-
-2. **Configuration**:
-   - Profile used (or custom parameters)
-   - All parameter values
-   - **NEW in v2**: Realization count and diversity mechanism
-
-3. **Results**:
-   - All required metrics (Section 14.1)
-   - All derived metrics (Section 14.2)
-   - Latency distribution (time from generation start to completion)
-   - **NEW in v2**: Per-realization success rates
-
----
-
-## 15. Implementation Requirements
-
-### 15.1 Mandatory Requirements (MUST)
-
-Implementations MUST satisfy the following:
-
-1. **Layer Separation**:
-   - Physical frame layer, realization layer, generation coding layer, broadcast scheduling layer, and policy layer MUST be independently testable
-   - No cross-layer coupling beyond defined interfaces
-
-2. **Header Validation**:
-   - Header CRC MUST be validated before payload decode
-   - Invalid headers MUST be discarded immediately
-
-3. **Generation State Tracking**:
-   - Receiver MUST maintain state for each active generation
-   - State MUST include at minimum: known logical symbols (realization-agnostic), systematic symbols, coded symbols, decode status, last progress timestamp
-
-4. **Realization Deduplication** (NEW in v2):
-   - Receiver MUST deduplicate symbols across realizations
-   - Only first successful decode of a logical symbol MUST be accepted
-
-5. **Profile Support**:
-   - MUST support at least the "balanced" profile
-   - SHOULD support all three standard profiles (robust, balanced, throughput)
-
-6. **Metrics Reporting**:
-   - MUST track all required metrics (Section 14.1)
-   - MUST provide mechanism to export metrics for analysis
-
-### 15.2 Recommended Requirements (SHOULD)
-
-Implementations SHOULD satisfy the following:
-
-1. **Decode Efficiency**:
-   - SHOULD attempt lightweight recovery (peeling/BP) before Gaussian elimination
-   - SHOULD NOT retry decode on every new symbol arrival
-
-2. **Memory Management**:
-   - SHOULD free generation state after successful decode
-   - SHOULD implement timeout for stalled generations
-
-3. **Parameter Validation**:
-   - SHOULD validate parameter consistency at initialization
-   - SHOULD warn if custom parameters deviate significantly from profile recommendations
+def peeling_decode(gen):
+    known = dict(gen.systematic_symbols)
+    pending = list(gen.coded_equations.values())
 
-4. **Progress Reporting**:
-   - SHOULD provide real-time progress indicators
-   - SHOULD report generation completion events
+    changed = True
+    while changed:
+        changed = False
+        for eq in pending:
+            eq = eliminate_known(eq, known)
+            if len(eq.variables) == 1:
+                idx = only_element(eq.variables)
+                if idx not in known:
+                    known[idx] = eq.rhs
+                    changed = True
 
-5. **Realization Diversity** (NEW in v2):
-   - SHOULD support at least one diversity mechanism (mask divergence recommended)
-   - SHOULD allow diversity to be disabled (D=1) for maximum throughput
-
-### 15.3 Prohibited Behaviors (MUST NOT)
-
-Implementations MUST NOT:
-
-1. **Sender-Side Adaptation**:
-   - MUST NOT implement sender-side adaptation in first version (without policy layer)
-   - MUST NOT assume reliable feedback channel exists
-
-2. **Cross-Generation Recovery**:
-   - Physical frame layer MUST NOT perform cross-generation recovery
-   - Generation coding layer MUST NOT depend on specific frame arrival order
-
-3. **Implicit Assumptions**:
-   - MUST NOT assume all frames will be received
-   - MUST NOT assume epoch boundaries are visible
-   - MUST NOT assume sender and receiver clocks are synchronized
-   - **NEW in v2**: MUST NOT assume all realizations have equal success rates
-
-4. **Realization Coupling** (NEW in v2):
-   - Realization layer MUST NOT make scheduling decisions
-   - Generation coding layer MUST NOT depend on specific realization success
-
----
-
-## 16. CLI Interface
-
-### 16.1 Sender CLI
-
-**Profile-Based Configuration** (recommended):
-
-```bash
-screen-airdrop-sender \
-  --protocol ogrb \
-  --ogrb-profile balanced \
-  --input ./file.tar.gz \
-  --window-name "screen-airdrop"
-```
-
-**Advanced Parameter Override**:
-
-```bash
-screen-airdrop-sender \
-  --protocol ogrb \
-  --ogrb-profile balanced \
-  --ogrb-generation-size 24 \
-  --ogrb-coded-redundancy 1.3 \
-  --ogrb-realization-count 2 \
-  --input ./file.tar.gz
-```
-
-**Full Manual Configuration**:
-
-```bash
-screen-airdrop-sender \
-  --protocol ogrb \
-  --ogrb-symbol-size 512 \
-  --ogrb-generation-size 22 \
-  --ogrb-generation-overlap 0.125 \
-  --ogrb-systematic-prefix 6 \
-  --ogrb-coded-redundancy 1.2 \
-  --ogrb-realization-count 1 \
-  --ogrb-max-active-generations 2 \
-  --ogrb-old-new-ratio 1.5 \
-  --input ./file.tar.gz
-```
-
-### 16.2 Receiver CLI
-
-**Basic Usage**:
-
-```bash
-screen-airdrop-receiver \
-  --protocol ogrb \
-  --source screen \
-  --window-title "Remote Desktop" \
-  --output-dir ./recovered
-```
-
-**With Decode Margin Override**:
-
-```bash
-screen-airdrop-receiver \
-  --protocol ogrb \
-  --ogrb-decode-margin 2 \
-  --source screen \
-  --output-dir ./recovered
-```
-
-### 16.3 Parameter Naming Convention
-
-All OGRB-specific parameters SHOULD use the `--ogrb-` prefix to avoid namespace collision with other protocols.
-
-**Standard Parameter Names**:
-- `--ogrb-profile`: Profile selection (robust/balanced/throughput)
-- `--ogrb-symbol-size`: Symbol size in bytes
-- `--ogrb-generation-size`: Number of symbols per generation
-- `--ogrb-generation-overlap`: Overlap fraction (0.0-0.5)
-- `--ogrb-systematic-prefix`: Number of systematic symbols sent first
-- `--ogrb-coded-redundancy`: Total symbols / generation size ratio
-- **`--ogrb-realization-count`**: **NEW in v2**: Number of visual realizations per symbol
-- `--ogrb-max-active-generations`: Maximum concurrent active generations
-- `--ogrb-old-new-ratio`: Airtime bias toward older generations
-- `--ogrb-decode-margin`: Extra symbols required before decode attempt
-
----
-
-## 17. Testing Requirements
-
-### 17.1 Unit Tests
-
-Implementations MUST include unit tests for:
-
-1. **Generation Partitioning**:
-   - Verify correct symbol ranges for each generation
-   - Test overlap calculation
-   - Test step size computation
-
-2. **Coded Symbol Generation**:
-   - Verify deterministic generation from seed
-   - Test degree distribution
-   - Verify XOR correctness
-
-3. **Realization Generation** (NEW in v2):
-   - Test each diversity mechanism independently
-   - Verify deterministic generation from realization_id
-   - Test reversibility (where applicable)
-
-4. **Header Encoding/Decoding**:
-   - Test all header fields including realization_id
-   - Verify CRC calculation
-   - Test invalid header rejection
-
-5. **Decode Logic**:
-   - Test direct recovery (all systematic received)
-   - Test peeling decoder
-   - Test Gaussian elimination fallback
-   - **NEW in v2**: Test realization deduplication
-
-### 17.2 Integration Tests
-
-Implementations SHOULD include integration tests for:
-
-1. **Synthetic Roundtrip**:
-   - Generate test data
-   - Encode with OGRB sender
-   - Decode with OGRB receiver (no loss)
-   - Verify bit-exact recovery
-   - **NEW in v2**: Test with diversity enabled (D>1)
-
-2. **Lossy Channel Simulation**:
-   - Simulate packet loss at various rates (5%, 10%, 20%)
-   - Verify generation recovery success rate
-   - Measure goodput vs raw throughput
-   - **NEW in v2**: Test with pattern-dependent failures
-
-3. **Realization Diversity Tests** (NEW in v2):
-   - Test that different realizations of same symbol are deduplicated
-   - Verify that any single realization success is sufficient
-   - Measure diversity efficiency
-
-4. **Profile Validation**:
-   - Test all three standard profiles
-   - Verify parameter consistency
-   - Measure performance characteristics
-
-### 17.3 Benchmark Tests
-
-Implementations SHOULD support benchmark modes:
-
-1. **Replay Benchmark**:
-   - Use pre-captured frame sequences
-   - Measure decode performance
-   - Compare across profiles
-   - **NEW in v2**: Compare across diversity settings
-
-2. **End-to-End Benchmark**:
-   - Real screen capture
-   - Measure actual throughput
-   - Track generation completion latency
-   - **NEW in v2**: Track per-realization success rates
-
-3. **Diversity Effectiveness Benchmark** (NEW in v2):
-   - Measure improvement from diversity (D=1 vs D=2 vs D=3)
-   - Identify pattern-dependent failure scenarios
-   - Quantify diversity overhead vs benefit
-
----
-
-## 18. Examples
-
-### 18.1 Example: Balanced Profile Calculation
-
-**Configuration**:
-```
-symbol_size = 512 bytes
-generation_size = 22
-generation_overlap = 0.125
-systematic_prefix = 6
-coded_redundancy = 1.2
-realization_count = 1        # NEW in v2
-```
-
-**Derived Values**:
-```
-step_size = 22 × (1 - 0.125) = 19.25 symbols
-generation_data_size = 22 × 512 = 11,264 bytes ≈ 11 KB
-step_data_size = 19.25 × 512 = 9,856 bytes ≈ 9.6 KB
-total_symbols_per_gen = 22 × 1.2 = 26.4 symbols
-coded_symbols_per_gen = 26.4 - 6 = 20.4 symbols
-effective_transmissions = 26.4 × 1 = 26.4 frames    # NEW in v2
-```
-
-**Generation Boundaries** (first 3 generations):
-```
-Generation 0: symbols [0, 21]     (22 symbols)
-Generation 1: symbols [19, 40]    (22 symbols, overlap with gen 0: [19, 21])
-Generation 2: symbols [38, 59]    (22 symbols, overlap with gen 1: [38, 40])
-```
-
-### 18.2 Example: Robust Profile with Diversity (NEW in v2)
-
-**Configuration**:
-```
-symbol_size = 512 bytes
-generation_size = 14
-generation_overlap = 0.25
-systematic_prefix = 4
-coded_redundancy = 1.5
-realization_count = 2        # NEW in v2
-```
-
-**Derived Values**:
-```
-step_size = 14 × (1 - 0.25) = 10.5 symbols
-generation_data_size = 14 × 512 = 7,168 bytes ≈ 7 KB
-step_data_size = 10.5 × 512 = 5,376 bytes ≈ 5.25 KB
-total_symbols_per_gen = 14 × 1.5 = 21 symbols
-coded_symbols_per_gen = 21 - 4 = 17 symbols
-effective_transmissions = 21 × 2 = 42 frames    # NEW in v2: doubled due to diversity
-```
-
-**Airtime Cost Analysis**:
-- Without diversity (D=1): 21 frames per generation
-- With diversity (D=2): 42 frames per generation
-- Overhead: 2× airtime cost
-- Benefit: Improved robustness against pattern-dependent failures
-
-### 18.3 Example: Transmission Sequence
-
-**Scenario**: Send 100 KB file with balanced profile
-
-**Steps**:
-
-1. **Partition**: 100 KB ÷ 512 bytes = 196 symbols total
-
-2. **Generation Count**:
-   - Step size = 19.25 symbols
-   - Generations needed ≈ 196 ÷ 19.25 ≈ 10.2 → 11 generations
-
-3. **Transmission**:
-   - Generation 0: Send symbols [0, 21]
-     - First 6 systematic: [0, 1, 2, 3, 4, 5]
-     - Then ~20 coded symbols
-   - Generation 1: Send symbols [19, 40]
-     - First 6 systematic: [19, 20, 21, 22, 23, 24]
-     - Then ~20 coded symbols
-   - Continue...
-
-4. **Scheduler Behavior** (with max_active_generations=2, old_new_ratio=1.5):
-   - When gen 0 and gen 1 are active:
-     - P(select gen 0) ∝ 1.5^1 = 1.5
-     - P(select gen 1) ∝ 1.5^0 = 1.0
-     - Gen 0 gets 60% airtime, gen 1 gets 40%
-
-### 18.4 Example: Transmission Sequence with Diversity (NEW in v2)
-
-**Scenario**: Send with robust profile (D=2)
-
-**Transmission order for generation 0, symbol 0**:
-```
-Frame 1: gen=0, symbol=0, type=SYSTEMATIC, realization=0
-Frame 2: gen=0, symbol=1, type=SYSTEMATIC, realization=0
-...
-Frame N: gen=0, symbol=0, type=SYSTEMATIC, realization=1  # Second realization
-```
-
-**Receiver behavior**:
-```
-Receive Frame 1: symbol 0, realization 0 → decode success → accept
-Receive Frame N: symbol 0, realization 1 → already have symbol 0 → ignore
-```
-
-### 18.5 Example: Receiver Decode Scenario
-
-**Scenario**: Receiver with 10% packet loss
-
-**Generation 0 Reception**:
-```
-Expected: 26 symbols (6 systematic + 20 coded)
-Received: 24 symbols (5 systematic + 19 coded)
-Loss: 2 symbols
-
-Decode condition: 24 >= 22 + 1 (K + M) ✓
-Attempt decode: Success (24 symbols sufficient for K=22)
-```
-
-**Generation 1 Reception**:
-```
-Expected: 26 symbols
-Received: 21 symbols (4 systematic + 17 coded)
-Loss: 5 symbols
-
-Decode condition: 21 >= 22 + 1 ✗
-Wait for more symbols...
-
-After 3 more symbols arrive:
-Received: 24 symbols total
-Decode condition: 24 >= 23 ✓
-Attempt decode: Success
-```
-
-### 18.6 Example: Receiver with Diversity (NEW in v2)
-
-**Scenario**: Receiver with 10% packet loss + pattern-dependent failures (D=2)
-
-**Generation 0 Reception**:
-```
-Expected: 42 transmissions (21 symbols × 2 realizations)
-Received: 38 transmissions
-  - Symbol 0: realization 0 failed, realization 1 success → accept
-  - Symbol 1: realization 0 success → accept (ignore realization 1 later)
-  - Symbol 2: both realizations failed → erasure
-  - ...
-Unique symbols decoded: 20
-
-Decode condition: 20 >= 22 + 1 ✗
-Wait for more symbols...
-
-After overlap with generation 1:
-Symbols [19, 21] recovered from generation 1
-Total unique symbols: 22
-Decode condition: 22 >= 23 ✗ (still need 1 more)
-
-After 2 more transmissions:
-Total unique symbols: 23
-Decode condition: 23 >= 23 ✓
-Attempt decode: Success
-```
-
-**Analysis**:
-- Without diversity: Would need all 26 transmissions to succeed
-- With diversity: Pattern-dependent failures mitigated by alternative realizations
-- Trade-off: 2× airtime cost, but higher success rate
-
----
-
-## 19. Comparison with Alternatives
-
-### 19.1 vs Sequential Transmission
-
-**Sequential** (current basic/compact):
-- Each frame = complete packet
-- Lost frame = wait for next epoch
-- Heavy frame-internal ECC
-
-**OGRB**:
-- Each frame = one symbol
-- Lost frame = erasure, recoverable via coding
-- Lightweight frame validation, heavy cross-frame coding
-- **NEW in v2**: Multiple realizations per symbol for pattern robustness
-
-**Advantage**: OGRB provides better loss tolerance and eliminates epoch waiting. v2 adds robustness against pattern-dependent failures.
-
-### 19.2 vs Whole-File Fountain
-
-**Whole-File Fountain**:
-- Entire file as one generation
-- Maximum flexibility
-- High decode complexity
-- Long time-to-first-recovery
-
-**OGRB**:
-- Small generations (10-30 symbols)
-- Limited flexibility
-- Low decode complexity
-- Fast per-generation recovery
-- **NEW in v2**: Realization diversity for visual channel robustness
-
-**Advantage**: OGRB provides predictable latency and manageable complexity, with v2 adding visual channel-specific optimizations.
-
-### 19.3 vs Fixed-Rate Block Codes
-
-**Fixed-Rate Block Codes** (e.g., Reed-Solomon):
-- Fixed redundancy ratio
-- Optimal for known loss rate
-- Cannot adapt to varying conditions
-
-**OGRB**:
-- Rateless coding (can generate unlimited coded symbols)
-- Works across varying loss rates
-- Sender can continue transmitting until receiver signals completion
-- **NEW in v2**: Realization diversity adapts to pattern-dependent failures
-
-**Advantage**: OGRB handles unknown or varying loss rates gracefully. v2 handles pattern-dependent failures that fixed-rate codes cannot address.
-
-### 19.4 OGRB v1 vs v2
-
-**v1**:
-- Single visual representation per symbol
-- Four-layer architecture
-- Static profiles only
-- Optimized for random packet loss
-
-**v2**:
-- Multiple visual realizations per symbol
-- Five-layer architecture (adds realization layer and policy layer)
-- Optional ML-driven adaptation
-- Optimized for both random loss and pattern-dependent failures
-
-**When to use v1**: Clean channels with random loss only
-**When to use v2**: Channels with compression, blur, or pattern-dependent failures
-
----
-
-## 20. Integration with Other Protocols
-
-### 20.1 Coexistence with Other Payload Types
-
-OGRB frames may coexist with other payload types in a hybrid system.
-
-**Possible payload types**:
-```
-SYMBOL_PAYLOAD    (OGRB)
-TILE_UPDATE       (spatial update)
-KEYFRAME          (full frame refresh)
-```
-
-OGRB applies only to `SYMBOL_PAYLOAD` frames.
-
-### 20.2 Integration with Physical Layer Protocols
-
-OGRB is agnostic to the physical layer encoding.
-
-**Compatible physical layers**:
-- Basic protocol (SAR3, four-corner fixed-grid)
-- Compact protocol (higher density)
-- Gray4 protocol (NEW, 4-level grayscale)
-- Future layered protocols
-
-**Realization diversity** (v2) can be implemented at:
-- Physical layer (different masks, spatial layouts)
-- Data layer (permutation, whitening)
-- Or both
-
----
-
-## 21. Future Extensions
-
-### 21.1 Potential Enhancements
-
-The following features are NOT part of the initial specification but MAY be added in future versions:
-
-1. **Sender-Side Adaptation**:
-   - Dynamic profile switching based on feedback
-   - Requires reliable reverse control channel
-   - Should be thoroughly benchmarked before deployment
-   - **v2 enables this via policy layer**
-
-2. **Unequal Error Protection**:
-   - Different protection levels for different data regions
-   - Higher redundancy for critical metadata
-   - Lower redundancy for bulk data
-
-3. **Multi-Layer Coding**:
-   - Combine OGRB with physical layer improvements (gray4, layered)
-   - Optimize control plane vs data plane separately
-
-4. **Progressive Decode**:
-   - Partial generation output before full recovery
-   - Useful for streaming scenarios
-   - Requires careful handling of incomplete data
-
-5. **Cross-Generation Coding**:
-   - Limited coding across generation boundaries
-   - Provides additional recovery paths
-   - Must maintain decode complexity bounds
-
-6. **Advanced Diversity Mechanisms** (v2):
-   - ML-selected realizations
-   - Adaptive modulation per realization
-   - Context-aware diversity policies
-
-7. **Reinforcement Learning Policy** (v2):
-   - Train policy network to optimize scheduling
-   - Learn from channel feedback
-   - Adapt to user-specific environments
-
-### 21.2 Non-Goals
-
-The following are explicitly NOT goals for OGRB:
-
-1. **Real-Time Streaming**: OGRB is optimized for file transfer, not low-latency streaming
-2. **Bidirectional Communication**: No built-in ACK/NACK mechanism
-3. **Encryption**: Security should be handled at application layer
-4. **Compression**: Data should be compressed before OGRB encoding
-
----
-
-## 22. Security Considerations
-
-OGRB does not provide:
-
+    if len(known) == gen.generation_size:
+        gen.systematic_symbols = known
+        gen.decode_complete = True
 ```
-encryption
-authentication
-compression
-```
-
-These functions must be implemented above the protocol layer.
-
-**Recommendations**:
-- Encrypt data before OGRB encoding
-- Use authenticated encryption (e.g., AES-GCM)
-- Compress data before encryption
-- Verify file integrity after reassembly (SHA-256)
-
----
-
-## 23. Glossary
-
-**Airtime**: The transmission time allocated to a particular generation or symbol type.
-
-**Coded Symbol**: A linear combination (XOR) of multiple source symbols within a generation.
-
-**Decode Margin**: Extra symbols required beyond the minimum (K) before attempting decode.
-
-**Degree**: Number of source symbols XORed together to create a coded symbol.
-
-**Diversity Efficiency** (NEW in v2): Ratio of unique symbols decoded to total symbols received.
-
-**Erasure**: A lost or corrupted frame treated as missing data (position known, value unknown).
-
-**Generation**: A group of consecutive source symbols that can be independently recovered.
-
-**Goodput**: Effective data throughput measured as successfully recovered data per unit time.
-
-**Logical Symbol** (NEW in v2): A source symbol in generation context, may have multiple realizations.
 
-**Overlap**: Fraction of symbols shared between consecutive generations.
+### 9.3 General Linear Solve
 
-**Pattern-Dependent Failure** (NEW in v2): Decode failure caused by visual pattern interaction with channel impairments.
+If the code family later uses denser equations, the receiver may switch from peeling to Gaussian elimination or another solver over the appropriate finite field.
 
-**Peeling Decoder**: Lightweight iterative decoder that resolves symbols one at a time.
+The semantic model does not change:
 
-**Policy Layer** (NEW in v2): Optional layer for ML-driven adaptive control.
+1. systematic units are known variables
+2. coded units are equations
 
-**Profile**: A named set of parameter values optimized for a specific scenario.
+### 9.4 Independence of Equations
 
-**Rateless Code**: A code that can generate unlimited coded symbols from a fixed set of source symbols.
+Multiple coded equations may be redundant.
 
-**Realization** (NEW in v2): A specific visual representation of a logical symbol.
+Receiver must not assume:
 
-**Realization Diversity** (NEW in v2): Multiple visual representations per logical symbol.
+1. every coded unit adds new information
+2. every received equation is independent
 
-**Revisit Pressure**: How frequently old generations receive additional recovery opportunities.
+Instead, decode progress depends on equation rank or peeling usefulness.
 
-**Source Symbol**: A fixed-size unit of original data (default: 512 bytes).
+### 9.5 Duplicate and Redundant Units
 
-**Step Size**: Number of symbols advanced between consecutive generation starts.
+Duplicate handling:
 
-**Systematic Symbol**: A source symbol transmitted without encoding (direct copy).
+1. same `(generation_id, source_index)` -> duplicate systematic unit
+2. same `(generation_id, equation_id)` -> duplicate coded unit
 
----
+Redundant but non-duplicate coded equations are still valid. They may fail to increase rank, but they must not be collapsed into source-symbol identity space.
 
-## 24. References
+## 10. Design Principles & Invariants
 
-### 24.1 Related Protocols
+The following invariants are mandatory.
 
-- **LT Codes**: Luby Transform codes, foundation for rateless coding
-- **Raptor Codes**: Systematic rateless codes with pre-coding
-- **RaptorQ**: IETF RFC 6330, standardized fountain code
+### 10.1 Layer Separation
 
-### 24.2 Relevant Literature
+1. information layer defines semantic units
+2. OGRB schedules semantic units
+3. visual transport carries semantic units
 
-- Luby, M. (2002). "LT codes". *Proceedings of the 43rd Annual IEEE Symposium on Foundations of Computer Science*.
-- Shokrollahi, A. (2006). "Raptor codes". *IEEE Transactions on Information Theory*.
-- MacKay, D. J. C. (2005). "Fountain codes". *IEE Proceedings - Communications*.
+No layer may silently absorb the responsibilities of another.
 
-### 24.3 Screen-Airdrop Documentation
+### 10.2 Identity Separation
 
-- [throughput_optimization_plan.md](./throughput_optimization_plan.md): Overall optimization strategy
-- [protocol_efficiency_report.md](./protocol_efficiency_report.md): Single-frame efficiency analysis
-- [benchmark_status.md](./benchmark_status.md): Current benchmark results
-- [screen_airdrop_robustness_plan_v_1.md](./screen_airdrop_robustness_plan_v_1.md): Robustness improvement plan
-- [header_ecc_experiment_plan.md](./header_ecc_experiment_plan.md): Header ECC experiments
+1. `SYSTEMATIC` identity is `(generation_id, source_index)`
+2. `CODED` identity is `(generation_id, equation_id)`
+3. these identity spaces must remain separate
 
----
+### 10.3 Decoding Semantics
 
-## 25. Revision History
+1. systematic symbols are known variables
+2. coded equations are constraints
+3. coded equations are not source symbols
 
-| Version | Date | Changes |
-|---------|------|---------|
-| 1.0 | 2026-03-09 | Initial specification |
-| 2.0 | 2026-03-15 | Added realization diversity, policy layer, ML integration |
+### 10.4 Erasure Discipline
 
----
+1. every invalid frame is an erasure
+2. invalid frames must not partially affect system state
+3. no partial reuse of corrupted payload is allowed
 
-## Appendix A: Parameter Quick Reference
+### 10.5 Transport Agnosticism
 
-### A.1 Robust Profile
+1. layered rendering is preserved
+2. gray4 is preserved as a transport option
+3. compact headers are preserved
+4. none of these transport choices may redefine information semantics
 
-```
-symbol_size = 512
-generation_size = 14
-generation_overlap = 0.25
-systematic_prefix = 4
-coded_redundancy = 1.5
-realization_count = 2          # NEW in v2
-max_active_generations = 2
-old_new_ratio = 2.0
-decode_margin = 2
-
-# Derived
-step_size = 10.5 symbols ≈ 5.25 KB
-generation_data_size = 7 KB
-total_symbols_per_gen = 21
-coded_symbols_per_gen = 17
-effective_transmissions = 42   # NEW in v2: 21 × 2
-```
-
-### A.2 Balanced Profile
-
-```
-symbol_size = 512
-generation_size = 22
-generation_overlap = 0.125
-systematic_prefix = 6
-coded_redundancy = 1.2
-realization_count = 1          # NEW in v2
-max_active_generations = 2
-old_new_ratio = 1.5
-decode_margin = 1
-
-# Derived
-step_size = 19.25 symbols ≈ 9.6 KB
-generation_data_size = 11 KB
-total_symbols_per_gen = 26.4
-coded_symbols_per_gen = 20.4
-effective_transmissions = 26.4 # NEW in v2: 26.4 × 1
-```
-
-### A.3 Throughput Profile
-
-```
-symbol_size = 512
-generation_size = 30
-generation_overlap = 0
-systematic_prefix = 10
-coded_redundancy = 1.08
-realization_count = 1          # NEW in v2
-max_active_generations = 1
-old_new_ratio = 1.0
-decode_margin = 0
-
-# Derived
-step_size = 30 symbols = 15 KB
-generation_data_size = 15 KB
-total_symbols_per_gen = 32.4
-coded_symbols_per_gen = 22.4
-effective_transmissions = 32.4 # NEW in v2: 32.4 × 1
-```
-
----
-
-## Appendix B: Implementation Checklist
-
-### B.1 Sender Implementation
-
-- [ ] Generation partitioning with overlap
-- [ ] Systematic symbol transmission
-- [ ] Coded symbol generation (with PRNG seed)
-- [ ] Degree distribution (Robust Soliton or similar)
-- [ ] **NEW in v2**: Realization generation (at least one diversity mechanism)
-- [ ] **NEW in v2**: Realization scheduling (round-robin minimum)
-- [ ] Broadcast scheduler with airtime allocation
-- [ ] Active generation set management
-- [ ] Header encoding with CRC (including realization_id)
-- [ ] Payload CRC calculation
-- [ ] Metrics tracking (frames sent, generations started, etc.)
-- [ ] **NEW in v2**: Per-realization metrics tracking
-- [ ] Profile support (at least balanced)
-- [ ] CLI parameter parsing
-
-### B.2 Receiver Implementation
-
-- [ ] Frame capture and decode
-- [ ] Header CRC validation
-- [ ] Payload CRC validation
-- [ ] **NEW in v2**: Realization deduplication (logical symbol tracking)
-- [ ] Generation state management
-- [ ] Systematic symbol storage
-- [ ] Coded symbol storage with metadata
-- [ ] Decode triggering logic
-- [ ] Direct recovery (all systematic received)
-- [ ] Peeling decoder
-- [ ] Gaussian elimination fallback
-- [ ] Generation timeout and cleanup
-- [ ] Metrics tracking (frames received, generations decoded, etc.)
-- [ ] **NEW in v2**: Duplicate symbol counting
-- [ ] **NEW in v2**: Per-realization success rate tracking
-- [ ] Profile support
-- [ ] CLI parameter parsing
-
-### B.3 Testing
-
-- [ ] Unit tests for generation partitioning
-- [ ] Unit tests for coded symbol generation
-- [ ] **NEW in v2**: Unit tests for realization generation
-- [ ] **NEW in v2**: Unit tests for realization deduplication
-- [ ] Unit tests for header encoding/decoding
-- [ ] Unit tests for decode logic
-- [ ] Integration test: synthetic roundtrip (no loss)
-- [ ] Integration test: lossy channel simulation (5%, 10%, 20%)
-- [ ] **NEW in v2**: Integration test: pattern-dependent failure simulation
-- [ ] **NEW in v2**: Integration test: diversity effectiveness (D=1 vs D=2)
-- [ ] Integration test: all three profiles
-- [ ] Benchmark: replay mode
-- [ ] Benchmark: end-to-end with real screen capture
-- [ ] **NEW in v2**: Benchmark: diversity overhead measurement
-
----
-
-## Appendix C: Troubleshooting Guide
-
-### C.1 Low Goodput
-
-**Symptoms**: Effective throughput much lower than expected
-
-**Possible Causes**:
-1. Packet loss rate higher than profile designed for
-   - **Solution**: Switch to more robust profile or increase redundancy
-2. Capture FPS too low
-   - **Solution**: Optimize capture backend or reduce sender FPS
-3. Decode failures due to insufficient symbols
-   - **Solution**: Increase decode margin or coded redundancy
-4. **NEW in v2**: Pattern-dependent failures
-   - **Solution**: Enable diversity (increase realization_count)
-
-### C.2 High Generation Failure Rate
-
-**Symptoms**: Many generations timeout without completing
-
-**Possible Causes**:
-1. Generation size too large for loss rate
-   - **Solution**: Reduce generation size
-2. Coded redundancy insufficient
-   - **Solution**: Increase coded redundancy
-3. Max active generations too high, fragmenting airtime
-   - **Solution**: Reduce to 2 or 1
-4. **NEW in v2**: High pattern-dependent failure rate
-   - **Solution**: Enable diversity (D=2 or D=3)
-
-### C.3 Slow Forward Progress
-
-**Symptoms**: Sender keeps revisiting old generations, new data not advancing
-
-**Possible Causes**:
-1. Overlap too high
-   - **Solution**: Reduce overlap (try 0.125 instead of 0.25)
-2. Old/new ratio too high
-   - **Solution**: Reduce old/new ratio (try 1.5 instead of 2.0)
-3. Too many active generations
-   - **Solution**: Reduce max active generations
-4. **NEW in v2**: Diversity overhead too high
-   - **Solution**: Reduce realization_count (try D=1)
-
-### C.4 Decode Complexity Too High
-
-**Symptoms**: Receiver CPU usage excessive, decode latency high
-
-**Possible Causes**:
-1. Generation size too large
-   - **Solution**: Reduce generation size
-2. Gaussian elimination triggered too often
-   - **Solution**: Increase systematic prefix or coded redundancy
-3. Decode attempted on every symbol arrival
-   - **Solution**: Implement decode throttling (only retry after +2 symbols)
-
-### C.5 Diversity Not Helping (NEW in v2)
-
-**Symptoms**: Enabling diversity (D>1) doesn't improve success rate
-
-**Possible Causes**:
-1. Failures are random, not pattern-dependent
-   - **Solution**: Disable diversity (D=1), increase redundancy instead
-2. All realizations use same diversity mechanism
-   - **Solution**: Try different diversity mechanisms
-3. Diversity mechanism not effective for this channel
-   - **Solution**: Experiment with different mechanisms (mask divergence, permutation, whitening)
-
-**Diagnostic**: Compare per-realization success rates. If all realizations have similar rates, failures are likely random, not pattern-dependent.
-
----
-
-## Appendix D: Diversity Mechanism Details (NEW in v2)
-
-### D.1 Mask Divergence Implementation
-
-**Concept**: Use different finder pattern masks for different realizations.
-
-**Implementation**:
-```python
-def apply_mask_divergence(symbol_data, realization_id):
-    mask_patterns = [
-        MASK_PATTERN_A,  # realization 0
-        MASK_PATTERN_B,  # realization 1
-        MASK_PATTERN_C,  # realization 2
-    ]
-    mask = mask_patterns[realization_id % len(mask_patterns)]
-    return encode_with_mask(symbol_data, mask)
-```
-
-**Benefit**: Reduces correlation between compression artifacts and specific mask patterns.
-
-### D.2 Symbol Permutation Implementation
-
-**Concept**: Reorder data bits before encoding.
-
-**Implementation**:
-```python
-def apply_permutation(symbol_data, realization_id):
-    permutation_seeds = [0, 12345, 67890]
-    seed = permutation_seeds[realization_id % len(permutation_seeds)]
-    rng = PRNG(seed)
-    indices = list(range(len(symbol_data)))
-    rng.shuffle(indices)
-    return bytes([symbol_data[i] for i in indices])
-```
+### 10.6 Scheduling Agnosticism
 
-**Receiver**: Apply inverse permutation after decode.
-
-### D.3 Payload Whitening Implementation
-
-**Concept**: XOR payload with PRNG sequence.
-
-**Implementation**:
-```python
-def apply_whitening(symbol_data, realization_id):
-    whitening_seeds = [0, 11111, 22222]
-    seed = whitening_seeds[realization_id % len(whitening_seeds)]
-    rng = PRNG(seed)
-    whitening_sequence = rng.bytes(len(symbol_data))
-    return xor_bytes(symbol_data, whitening_sequence)
-```
-
-**Receiver**: Apply same whitening (XOR is self-inverse).
-
-### D.4 Spatial Permutation Implementation
-
-**Concept**: Rearrange spatial layout of symbol tiles.
-
-**Implementation**:
-```python
-def apply_spatial_permutation(symbol_data, realization_id, grid_size):
-    permutation_patterns = [
-        "standard",      # realization 0
-        "checkerboard",  # realization 1
-        "spiral",        # realization 2
-    ]
-    pattern = permutation_patterns[realization_id % len(permutation_patterns)]
-    return rearrange_tiles(symbol_data, pattern, grid_size)
-```
+OGRB must not redefine symbol meaning. It chooses emission order and redundancy only.
 
-**Benefit**: Reduces correlation between spatial compression blocks and symbol boundaries.
+### 10.7 Engineering Rule
 
----
+If an implementation detail makes it difficult to maintain the distinction between:
 
-**End of Specification**
+1. `SYSTEMATIC` vs `CODED`
+2. unit identity vs frame identity
+3. valid frame vs erasure
 
+that implementation detail is wrong and must be changed.

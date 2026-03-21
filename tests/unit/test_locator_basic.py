@@ -1,7 +1,7 @@
 import numpy as np
 
 from screen_airdrop.common.protocol_basic import FRAME_DATA, FrameHeaderBasic
-from screen_airdrop.receiver.locator_basic import LocateError, LocatorConfig, locate_frame
+from screen_airdrop.receiver.locator.basic import LocateError, LocatorConfig, locate_frame
 from screen_airdrop.sender.encoder_basic import encode_frame_basic
 
 

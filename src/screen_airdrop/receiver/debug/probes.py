@@ -8,7 +8,7 @@ from screen_airdrop.receiver.detector_basic import (
     _bbox_from_non_black,
     detect_symbol_bbox,
 )
-from screen_airdrop.receiver.locator_basic import (
+from screen_airdrop.receiver.locator.basic import (
     LocateError,
     LocatorConfig,
     locate_frame,

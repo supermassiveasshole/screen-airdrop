@@ -1,6 +1,6 @@
 """Tests for pipeline_factory module."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from screen_airdrop.receiver.assembler import ChunkAssembler
 from screen_airdrop.receiver.capture_mss import ScreenCapture

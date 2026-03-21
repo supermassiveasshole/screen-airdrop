@@ -93,6 +93,13 @@ Its purpose is to carry only the minimum information required to decode the rest
 - fixed placement
 - stable mask strategy
 
+Current vNext.1 implementation note:
+
+- the control band remains physically separate from the body
+- each `3x2` control cell now carries one `2-bit` template symbol rather than a single thresholded bit
+- the bootstrap band is `4` control rows plus `1` isolation row
+- reference cells are template references, not just dark/light threshold anchors
+
 ### Bootstrap contents
 
 Only fields required to enter body decode should live here.
@@ -103,10 +110,15 @@ Recommended fields:
 - frame type
 - short session or generation identity
 - body profile id
-- body ECC profile id
-- body payload length or coded symbol length
+- body payload length
 - body realization seed / mask seed
 - bootstrap CRC
+
+Current vNext.1 implementation note:
+
+- `body ECC profile id` is no longer transmitted separately on the wire
+- a compact `body profile wire id` maps deterministically to the internal body ECC profile
+- `coded symbol length` is derived from `payload_len + body_profile`
 
 Possible optional fields:
 

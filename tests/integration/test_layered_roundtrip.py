@@ -7,7 +7,11 @@ import numpy as np
 import pytest
 
 from screen_airdrop.common.protocol_basic import FrameHeaderBasic
-from screen_airdrop.common.protocol_layered import LAYERED_BOOTSTRAP_ROWS
+from screen_airdrop.common.protocol_layered import (
+    LAYERED_BODY_PROFILE_DENSE,
+    LAYERED_BODY_PROFILE_ROBUST,
+    LAYERED_BOOTSTRAP_ROWS,
+)
 from screen_airdrop.receiver.decoder_layered import decode_frame_layered
 from screen_airdrop.sender.encoder_layered import (
     build_layout_layered,
@@ -54,6 +58,41 @@ def test_layered_encoder_decoder_roundtrip():
     assert decoded_header.total_frames == header.total_frames
     assert decoded_header.chunk_id == header.chunk_id
     assert decoded_payload == payload
+
+
+@pytest.mark.parametrize("body_profile_id", [LAYERED_BODY_PROFILE_DENSE, LAYERED_BODY_PROFILE_ROBUST])
+def test_layered_encoder_decoder_roundtrip_with_explicit_body_profiles(body_profile_id):
+    payload = bytes(range(96))
+    header = FrameHeaderBasic.make(
+        frame_type=1,
+        session_id=321,
+        epoch_id=7,
+        frame_id=11,
+        total_frames=32,
+        chunk_id=9,
+        payload=payload,
+    )
+    frame = encode_frame_layered(
+        header,
+        payload,
+        width=1920,
+        height=1080,
+        grid_w=224,
+        grid_h=136,
+        guard_band=1,
+        corner_size=7,
+        body_profile_id=body_profile_id,
+    )
+    decoded_header, decoded_payload, meta = decode_frame_layered(
+        frame,
+        grid_w=224,
+        grid_h=136,
+        guard_band=1,
+        corner_size=7,
+    )
+    assert decoded_header.chunk_id == header.chunk_id
+    assert decoded_payload == payload
+    assert int(meta.body_profile_id) == int(body_profile_id)
 
 
 def test_layered_roundtrip_survives_top_band_brightness_shift():

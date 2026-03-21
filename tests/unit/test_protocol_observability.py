@@ -33,13 +33,18 @@ def test_layered_report_adapter_accumulates_trace_and_failures():
     adapter = LayeredReportAdapter()
     adapter.accumulate_success(
         SimpleNamespace(
+            body_profile_id=3,
+            body_profile_name="dense",
             control_trace={
                 "bootstrap_attempt_count": 1,
-                "bootstrap_threshold": 120,
+                "bootstrap_threshold": 0,
                 "bootstrap_vote_margin_min": 4.0,
                 "bootstrap_vote_margin_avg": 8.0,
                 "bootstrap_erasure_symbol_count": 2,
                 "bootstrap_rs_corrected": 1,
+                "bootstrap_template_best_score_avg": 1.5,
+                "bootstrap_template_margin_avg": 8.0,
+                "control_reference_decode_mode": "reference_templates",
                 "control_band_decode_stage": "ok",
             }
         )
@@ -48,19 +53,25 @@ def test_layered_report_adapter_accumulates_trace_and_failures():
         "bootstrap rs decode failed",
         trace={
             "bootstrap_attempt_count": 1,
-            "bootstrap_threshold": 118,
+            "bootstrap_threshold": 0,
             "bootstrap_vote_margin_min": 1.0,
             "bootstrap_vote_margin_avg": 3.0,
             "bootstrap_erasure_symbol_count": 3,
             "bootstrap_rs_corrected": 0,
+            "bootstrap_template_best_score_avg": 6.5,
+            "bootstrap_template_margin_avg": 3.0,
+            "control_reference_decode_mode": "reference_templates",
             "control_band_decode_stage": "bootstrap_rs",
-            "bootstrap_bits": [0] * 16,
-            "disagree_bit_positions": [1, 4],
+            "dibits": [0] * 8,
         },
     )
     summary = adapter.finalize_summary()
     assert summary["layered_core_header_rs_fail_count"] == 1.0
-    assert summary["layered_bootstrap_bit_fail_counts"][1] == 1
+    assert summary["layered_control_reference_decode_mode"] == "reference_templates"
+    assert summary["layered_body_profile_id"] == 3.0
+    assert summary["layered_body_ecc_profile_id"] == 3.0
+    assert summary["layered_bootstrap_template_best_score_avg"] > 0.0
     assert "layered_debug" in summary["protocol_debug"]
     layered_debug = summary["protocol_debug"]["layered_debug"]
     assert layered_debug["core_header"]["erasure_symbol_count_avg"] > 0
+    assert layered_debug["body"]["profile_name"] == "dense"

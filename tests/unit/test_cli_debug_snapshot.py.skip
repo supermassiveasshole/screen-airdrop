@@ -1,0 +1,60 @@
+import json
+
+import numpy as np
+
+from screen_airdrop.receiver.debug.snapshot import DebugSnapshotManager
+
+
+def test_debug_snapshot_writes_plane_and_control_indexes(tmp_path):
+    frame = np.zeros((64, 64, 3), dtype=np.uint8)
+    debug_dir = tmp_path / "debug"
+
+    manager = DebugSnapshotManager(debug_dir=str(debug_dir))
+    manager.dump_snapshot(
+        frame_index=1,
+        frame=frame,
+        threshold=128,
+        forced_roi_local=None,
+        forced_roi_abs=None,
+        capture_region=None,
+        decode_error=None,
+        protocol_path_used="gray4",
+        track_roi_local=None,
+        det_bbox_local=None,
+        control_plane_kinds=["layout", "manifest"],
+        control_layout={"protocol": "gray4", "module_grid": "160x96"},
+        control_session=None,
+        control_generation=None,
+        control_generations_seen=[],
+        decoded_chunk_id=0xFFFFFFFE,
+        decoded_payload=b'{"protocol":"gray4","module_grid":"160x96"}',
+    )
+
+    meta = json.loads((debug_dir / "frame_00001.json").read_text(encoding="utf-8"))
+    assert meta["decoded_plane"] == "control"
+    assert meta["decoded_control_kind"] == "layout"
+    assert meta["control_layout"]["module_grid"] == "160x96"
+
+    all_index = (debug_dir / "index_all.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    assert len(all_index) == 1
+    all_record = json.loads(all_index[0])
+    assert all_record["plane"] == "control"
+    assert all_record["control_kind"] == "layout"
+
+    plane_sidecar = json.loads(
+        (debug_dir / "by_plane" / "control" / "frame_00001.json").read_text(encoding="utf-8")
+    )
+    assert plane_sidecar["frame_json"] == "frame_00001.json"
+
+    kind_sidecar = json.loads(
+        (debug_dir / "by_control_kind" / "layout" / "frame_00001.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert kind_sidecar["control_kind"] == "layout"
+
+    summary = json.loads((debug_dir / "summary.json").read_text(encoding="utf-8"))
+    assert summary["total_frames"] == 1
+    assert summary["planes"]["control"] == 1
+    assert summary["control_kinds"]["layout"] == 1
+    assert summary["protocol_paths"]["gray4"] == 1

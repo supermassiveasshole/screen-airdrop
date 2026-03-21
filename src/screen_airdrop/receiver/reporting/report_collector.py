@@ -58,15 +58,9 @@ class ReportCollector:
         return self._report
 
     def on_decode_success(self, meta: Any) -> None:
-        """Handle decode success event.
-
-        DEPRECATED: No longer used. Protocol data is extracted from
-        pipeline snapshot in finalize() to avoid runtime overhead.
-
-        Args:
-            meta: Decode metadata object from decoder
-        """
-        pass  # No-op for performance
+        """Handle decode success event."""
+        if self._protocol_collector is not None:
+            self._protocol_collector.on_decode_success(meta)
 
     def on_decode_failure(
         self,
@@ -74,17 +68,9 @@ class ReportCollector:
         failure_class: str,
         context: Optional[Dict[str, Any]] = None
     ) -> None:
-        """Handle decode failure event.
-
-        DEPRECATED: No longer used. Protocol data is extracted from
-        pipeline snapshot in finalize() to avoid runtime overhead.
-
-        Args:
-            error: Error message
-            failure_class: Failure classification (header, payload, locator, unknown)
-            context: Optional context dictionary with protocol-specific details
-        """
-        pass  # No-op for performance
+        """Handle decode failure event."""
+        if self._protocol_collector is not None:
+            self._protocol_collector.on_decode_failure(error, failure_class, context)
 
     def finalize(
         self,

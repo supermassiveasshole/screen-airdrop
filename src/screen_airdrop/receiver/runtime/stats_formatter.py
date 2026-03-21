@@ -65,7 +65,12 @@ class ScreenLiveStatsFormatter(StatsFormatter):
         missing_str = "?" if missing_count is None else str(missing_count)
         dropped_queue = int(snapshot.get("dropped_queue_full", 0))
         dropped_slot = int(snapshot.get("dropped_slot_unavailable", 0))
-        dropped_str = f"{dropped_queue}/{dropped_slot}"
+        dropped_starvation = int(snapshot.get("dropped_slot_starvation", 0))
+        dropped_total = dropped_queue + dropped_slot + dropped_starvation
+        dropped_str = (
+            f"{dropped_total}(q={dropped_queue} slot={dropped_slot} "
+            f"starve={dropped_starvation})"
+        )
         dedup = int(snapshot.get("duplicate_frames", 0))
 
         # Calculate FPS metrics

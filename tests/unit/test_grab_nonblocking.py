@@ -1,8 +1,15 @@
 """Tests for grab non-blocking mechanism and slot starvation handling."""
 
+import asyncio
+import queue
+import threading
+from types import SimpleNamespace
+
 import pytest
 
 from screen_airdrop.receiver.runtime.stats import ScreenLiveRuntimeStats
+from screen_airdrop.receiver.runtime.events import FilledSlotEvent
+from screen_airdrop.receiver.runtime.workers import _async_grab_loop
 
 
 def test_slot_starvation_stats():
@@ -129,3 +136,82 @@ def test_high_starvation_scenario():
     assert snapshot["dropped_slot_starvation"] == 70
     starvation_rate = snapshot["dropped_slot_starvation"] / snapshot["raw_grab_frames"]
     assert starvation_rate == 0.7  # 70% starvation
+
+
+def test_async_grab_loop_copy_task_progresses_while_slot_source_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeShot:
+        def __init__(self) -> None:
+            self.raw = b"\x01" * (4 * 4 * 4)
+
+    class _FakeMSS:
+        def __enter__(self) -> "_FakeMSS":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def grab(self, monitor):
+            return _FakeShot()
+
+    class _BlockingSlotQueue:
+        def __init__(self) -> None:
+            self._items: "queue.Queue[object]" = queue.Queue()
+            self._items.put((0, 1))
+
+        def get(self) -> object:
+            return self._items.get()
+
+        def put(self, item: object) -> object:
+            self._items.put(item)
+            return None
+
+    class _DescriptorQueue:
+        def __init__(self, stop_event: threading.Event, slot_queue: _BlockingSlotQueue) -> None:
+            self.items: list[object] = []
+            self._stop_event = stop_event
+            self._slot_queue = slot_queue
+
+        def get(self) -> object:
+            raise queue.Empty
+
+        def put(self, item: object) -> object:
+            self.items.append(item)
+            if isinstance(item, FilledSlotEvent):
+                self._stop_event.set()
+                self._slot_queue.put(None)
+            return None
+
+    monkeypatch.setitem(__import__("sys").modules, "mss", SimpleNamespace(mss=_FakeMSS))
+    monkeypatch.setattr(
+        "screen_airdrop.receiver.runtime.workers.get_monitor_region",
+        lambda monitor_index: (0, 0, 4, 4),
+    )
+    monkeypatch.setattr(
+        "screen_airdrop.receiver.runtime.workers.resolve_window_region",
+        lambda window_title, explicit_region, monitor_region: (0, 0, 4, 4),
+    )
+
+    stop_event = threading.Event()
+    slot_queue = _BlockingSlotQueue()
+    descriptor_queue = _DescriptorQueue(stop_event, slot_queue)
+    slot_view = __import__("numpy").zeros((4, 4, 4), dtype=__import__("numpy").uint8)
+
+    asyncio.run(
+        asyncio.wait_for(
+            _async_grab_loop(
+                slot_assign_queue=slot_queue,
+                descriptor_queue=descriptor_queue,
+                stop_event=stop_event,
+                slot_views=[slot_view],
+                target_fps=120.0,
+                window_title=None,
+                explicit_region=None,
+                monitor_index=1,
+            ),
+            timeout=1.0,
+        )
+    )
+
+    assert any(isinstance(item, FilledSlotEvent) for item in descriptor_queue.items)

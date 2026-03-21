@@ -15,23 +15,33 @@ from screen_airdrop.common.protocol_basic import FrameHeaderBasic
 from screen_airdrop.common.protocol_layered import (
     BODY_META_STRUCT,
     BODY_TRAILER_SIZE,
+    LAYERED_BODY_PROFILE_DENSE,
+    LAYERED_BODY_PROFILE_ROBUST,
     LAYERED_BOOTSTRAP_REFERENCE_CELLS,
+    LAYERED_BOOTSTRAP_ROWS,
+    LAYERED_CONTROL_CELL_TEMPLATES,
     LAYERED_CONTROL_PATH_VERSION,
+    LAYERED_MAGIC,
+    LAYERED_VERSION,
     BootstrapFields,
     LayeredBodyMeta,
     build_body_raw_bytes,
     decode_body_raw_bytes,
+    layered_body_profile_wire_id,
     layered_bootstrap_payload_size_bytes,
+    layered_short_session_tag,
+    normalize_layered_session_id,
 )
 from screen_airdrop.receiver.decoder_compact import _run_locator as _run_locator_compact
 from screen_airdrop.receiver.decoder_gray4 import _sample_gray4_modules
 from screen_airdrop.receiver.decoder_layered import (
     LayeredDecodeTraceError,
+    _control_template_match,
     _decode_bootstrap_control_band,
     decode_frame_layered,
     decode_frame_layered_with_geometry,
 )
-from screen_airdrop.receiver.locator_basic import LocatorConfig
+from screen_airdrop.receiver.locator.basic import LocatorConfig
 from screen_airdrop.receiver.protocol_adapter_layered import LayeredProtocolDecoder
 from screen_airdrop.sender.encoder_layered import (
     build_layout_layered,
@@ -42,22 +52,32 @@ from screen_airdrop.sender.encoder_layered import (
 
 def test_layered_bootstrap_pack_roundtrip():
     fields = BootstrapFields(
-        magic=0x5341524C,
-        version=4,
+        magic=LAYERED_MAGIC,
+        version=LAYERED_VERSION,
         frame_type=1,
-        session_id=123,
-        epoch_id=4,
-        frame_id=5,
+        short_session_tag=layered_short_session_tag(123),
+        body_profile_id=3,
         payload_len=1024,
-        body_coded_len=1040,
         body_mask_id=3,
     )
     decoded = BootstrapFields.unpack(fields.pack())
     assert decoded == fields
+    assert int(decoded.body_profile_wire_id) == int(layered_body_profile_wire_id(3))
+
+
+def test_layered_session_id_is_normalized_to_16bit_transport_identity():
+    session_id = 0x12345678
+    assert normalize_layered_session_id(session_id) == 0x5678
 
 
 def test_layered_body_meta_roundtrip():
-    meta = LayeredBodyMeta(total_frames=77, chunk_id=12, payload_crc32=0x12345678)
+    meta = LayeredBodyMeta(
+        total_frames=77,
+        chunk_id=12,
+        payload_crc32=0x12345678,
+        epoch_id=4,
+        frame_id=9,
+    )
     payload = b"hello layered"
     decoded_meta, decoded_payload = decode_body_raw_bytes(
         build_body_raw_bytes(meta, payload),
@@ -66,16 +86,15 @@ def test_layered_body_meta_roundtrip():
     assert decoded_meta == meta
     assert decoded_payload == payload
 
+
 def test_layered_bootstrap_crc_failure():
     fields = BootstrapFields(
-        magic=0x5341524C,
-        version=4,
+        magic=LAYERED_MAGIC,
+        version=LAYERED_VERSION,
         frame_type=1,
-        session_id=123,
-        epoch_id=4,
-        frame_id=5,
+        short_session_tag=layered_short_session_tag(123),
+        body_profile_id=3,
         payload_len=32,
-        body_coded_len=48,
         body_mask_id=3,
     )
     bad = bytearray(fields.pack())
@@ -89,7 +108,13 @@ def test_layered_bootstrap_crc_failure():
 
 
 def test_layered_body_crc_failure():
-    meta = LayeredBodyMeta(total_frames=7, chunk_id=3, payload_crc32=0x01020304)
+    meta = LayeredBodyMeta(
+        total_frames=7,
+        chunk_id=3,
+        payload_crc32=0x01020304,
+        epoch_id=1,
+        frame_id=8,
+    )
     payload = b"layered payload"
     bad = bytearray(build_body_raw_bytes(meta, payload))
     bad[BODY_META_STRUCT.size] ^= 0x01
@@ -114,7 +139,7 @@ def test_layered_layout_invariants():
     reference_points = {point for cell in layout.bootstrap_reference_cells for point in cell}
     assert reference_points
     assert reference_points.isdisjoint(bootstrap_points)
-    isolation_y_cut = layout.base.grid_y0 + 12
+    isolation_y_cut = layout.base.grid_y0 + LAYERED_BOOTSTRAP_ROWS
     assert all(y < isolation_y_cut for _, y in bootstrap_points)
     assert all(y >= isolation_y_cut + 1 for _, y in layout.body_coords)
     expected_cap = layout.user_payload_capacity_bytes
@@ -124,19 +149,48 @@ def test_layered_layout_invariants():
     assert frame_capacity_bytes_layered(224, 136, 1, 7) == expected_cap
     assert len(layout.bootstrap_cells) > 0
     assert len(layout.bootstrap_reference_cells) == LAYERED_BOOTSTRAP_REFERENCE_CELLS
-    assert layered_bootstrap_payload_size_bytes() + LAYERED_BOOTSTRAP_RS.nsym <= (layout.bootstrap_capacity_bits // 8)
+    assert (layered_bootstrap_payload_size_bytes() + LAYERED_BOOTSTRAP_RS.nsym) * 8 <= layout.bootstrap_capacity_bits
+
+
+def test_layered_vnext_dense_capacity_exceeds_previous_baseline():
+    current_vnext_dense = frame_capacity_bytes_layered(
+        240,
+        144,
+        1,
+        7,
+        body_profile_id=LAYERED_BODY_PROFILE_DENSE,
+    )
+    current_vnext_robust = frame_capacity_bytes_layered(
+        240,
+        144,
+        1,
+        7,
+        body_profile_id=LAYERED_BODY_PROFILE_ROBUST,
+    )
+    assert current_vnext_dense > 7348
+    assert current_vnext_dense > current_vnext_robust
+
+
+def test_layered_vnext_dense_hits_224_target_ratio():
+    gray4_l = 7530
+    dense = frame_capacity_bytes_layered(
+        224,
+        136,
+        1,
+        7,
+        body_profile_id=LAYERED_BODY_PROFILE_DENSE,
+    )
+    assert dense / gray4_l >= 0.92
 
 
 def test_layered_bootstrap_rs_erasures_can_recover_single_corrupted_symbol():
     raw = BootstrapFields(
-        magic=0x5341524C,
-        version=4,
+        magic=LAYERED_MAGIC,
+        version=LAYERED_VERSION,
         frame_type=1,
-        session_id=123,
-        epoch_id=4,
-        frame_id=5,
+        short_session_tag=layered_short_session_tag(123),
+        body_profile_id=3,
         payload_len=32,
-        body_coded_len=48,
         body_mask_id=3,
     ).pack()
     coded = bytearray(encode_rs_bytes(LAYERED_BOOTSTRAP_RS, raw))
@@ -151,6 +205,17 @@ def test_layered_bootstrap_rs_erasures_can_recover_single_corrupted_symbol():
         [0],
     )
     assert decoded == raw
+
+
+def test_layered_control_templates_match_expected_symbols():
+    dark = 24.0
+    light = 228.0
+    for symbol, template in enumerate(LAYERED_CONTROL_CELL_TEMPLATES):
+        samples = [int(light if bit else dark) for bit in template]
+        matched, best_score, confidence_margin = _control_template_match(samples, dark, light)
+        assert matched == symbol
+        assert best_score == 0.0
+        assert confidence_margin > 0.0
 
 
 def test_layered_control_band_decode_success():
@@ -189,9 +254,10 @@ def test_layered_control_band_decode_success():
         layout,
         calibration_by_mask=None,
     )
-    assert int(bootstrap.session_id) == 1234
+    assert int(bootstrap.short_session_tag) == layered_short_session_tag(1234)
     assert int(trace["control_path_version"]) == int(LAYERED_CONTROL_PATH_VERSION)
     assert int(trace["bootstrap_attempt_count"]) >= 1
+    assert str(trace["control_reference_decode_mode"]) == "reference_templates"
     assert trace["control_band_decode_stage"] == "ok"
 
 
@@ -202,6 +268,7 @@ def test_layered_control_band_decode_failure():
         _decode_bootstrap_control_band(avg_gray_u8, layout, calibration_by_mask=None)
     except LayeredDecodeTraceError as exc:
         assert str(exc) in {
+            "bootstrap template match failed",
             "bootstrap rs decode failed",
             "bootstrap crc mismatch",
         }

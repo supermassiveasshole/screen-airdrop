@@ -32,7 +32,9 @@ from screen_airdrop.common.protocol_basic import (
     FRAME_SYNC,
     FrameHeaderBasic,
 )
+from screen_airdrop.common.protocol_layered import normalize_layered_session_id
 from screen_airdrop.sender.encoder_layered import (
+    layered_body_profile_id_for_ecc_level,
     layered_control_layout_metadata,
     layered_profile_metadata,
 )
@@ -120,6 +122,7 @@ def _build_layout_control_payload(
     effective_chunk_size: int,
     module_grid: str,
 ) -> bytes:
+    layered_body_profile_id = layered_body_profile_id_for_ecc_level(ecc_level)
     return encode_layout_bootstrap(
         {
             "protocol": protocol,
@@ -138,8 +141,14 @@ def _build_layout_control_payload(
             "module_grid": module_grid,
             **(
                 {
-                    **layered_profile_metadata(),
-                    **layered_control_layout_metadata(),
+                    **layered_profile_metadata(layered_body_profile_id),
+                    **layered_control_layout_metadata(
+                        int(getattr(layout_info, "grid_w", 0)),
+                        int(getattr(layout_info, "grid_h", 0)),
+                        int(getattr(layout_info, "guard_band", 0)),
+                        int(getattr(layout_info, "finder_size", 0)),
+                        layered_body_profile_id,
+                    ),
                 }
                 if protocol == "layered"
                 else {}
@@ -306,6 +315,8 @@ def build_encoded_frames(
         raise ValueError(
             f"Protocol '{protocol}' not supported, use 'basic', 'compact', 'gray4', or 'layered'"
         )
+    if protocol == "layered":
+        session_id = normalize_layered_session_id(int(session_id))
     normalized_fill_ratio = max(0.05, min(1.0, float(chunk_fill_ratio)))
     robust_cap = min(int(cap), max(64, int(cap * normalized_fill_ratio)))
     effective_chunk_size = int(robust_cap)
@@ -372,7 +383,11 @@ def build_encoded_frames(
     total_data_frames = ((len(control_items) + 1) * control_burst_repeat) + payload_frame_count
 
     # Yield metadata first so caller can access session_id, manifest, etc.
-    layered_profiles = layered_profile_metadata() if protocol == "layered" else {}
+    layered_profiles = (
+        layered_profile_metadata(layered_body_profile_id_for_ecc_level(ecc_level))
+        if protocol == "layered"
+        else {}
+    )
     metadata = {
         "session_id": session_id,
         "manifest": built["manifest"],

@@ -209,10 +209,32 @@ def test_layered_metadata_exposes_profiles(tmp_path):
     metadata = dict(first["metadata"])
     assert int(metadata["bootstrap_profile_id"]) == 2
     assert int(metadata["bootstrap_ecc_profile_id"]) == 2
-    assert int(metadata["body_profile_id"]) == 1
-    assert int(metadata["body_ecc_profile_id"]) == 1
+    assert int(metadata["body_profile_id"]) == 4
+    assert str(metadata["body_profile_name"]) == "robust"
+    assert int(metadata["body_ecc_profile_id"]) == 4
 
     control_layout = next(
         item for item in metadata["control_plane"] if item["kind"] == "layout"
     )
     assert int(control_layout["payload_size"]) > 0
+
+
+def test_layered_sender_normalizes_session_identity_to_16bit(tmp_path):
+    sample = tmp_path / "sample.txt"
+    sample.write_text("hello layered session identity", encoding="utf-8")
+
+    first = next(
+        build_encoded_frames(
+            input_path=str(sample),
+            protocol="layered",
+            compress="none",
+            sync_frames=0,
+            chunk_fill_ratio=1.0,
+            module_grid="224x136",
+            session_id=0x12345678,
+            epochs=1,
+        )
+    )
+
+    metadata = dict(first["metadata"])
+    assert int(metadata["session_id"]) == 0x5678

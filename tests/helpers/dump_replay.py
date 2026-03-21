@@ -14,6 +14,7 @@ def dump_and_replay(
     src: Path,
     protocol: str,
     module_grid: str,
+    replay_geometry_mode: str = "stateful",
 ) -> Tuple[dict, Path]:
     frame_dir = tmp_path / f"{protocol}-frames"
     out_dir = tmp_path / f"{protocol}-out"
@@ -50,6 +51,8 @@ def dump_and_replay(
             module_grid,
             "--report-json",
             str(replay_report),
+            "--replay-geometry-mode",
+            replay_geometry_mode,
             "--max-seconds",
             "120",
             "--stats-interval",

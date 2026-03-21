@@ -53,6 +53,8 @@ class PipelineRunner:
         self.start_time = time.time()
         self.last_good_time = self.start_time
         self.next_stats_time = self.start_time + stats_interval
+        self._last_decode_ok = 0
+        self._last_assembled = 0
 
     def run(self) -> Tuple[int, Report]:
         """运行 pipeline 直到完成或超时。
@@ -91,10 +93,8 @@ class PipelineRunner:
                 self._print_stats()
                 self.next_stats_time = now + self.stats_interval
 
-            # 更新 last_good_time
             snap = self.pipeline.snapshot()
-            if snap.get("decode_ok", 0) > 0:
-                self.last_good_time = now
+            self._refresh_last_good_time(snap, now)
 
             time.sleep(0.1)
 
@@ -133,6 +133,17 @@ class PipelineRunner:
             return (2, report)
 
         return None
+
+    def _refresh_last_good_time(self, snapshot: dict, now: float) -> None:
+        """Refresh idle timer only when decode/assembly counters advance."""
+        decode_ok = int(snapshot.get("decode_ok", 0) or 0)
+        assembled = int(snapshot.get("assembled", 0) or 0)
+
+        if decode_ok > self._last_decode_ok or assembled > self._last_assembled:
+            self.last_good_time = now
+
+        self._last_decode_ok = decode_ok
+        self._last_assembled = assembled
 
     def _print_stats(self) -> None:
         """打印实时统计（委托给 ProgressReporter）。"""
