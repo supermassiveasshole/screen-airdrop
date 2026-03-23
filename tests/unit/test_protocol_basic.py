@@ -1,4 +1,4 @@
-from screen_airdrop.common.protocol_basic import (
+from screen_airdrop.common.transport.protocol_basic import (
     FRAME_DATA,
     FrameHeaderBasic,
     decode_header_and_payload_bits,

@@ -3,8 +3,8 @@ from pathlib import Path
 import cv2
 import pytest
 
-from screen_airdrop.common.protocol_basic import FRAME_DATA
-from screen_airdrop.receiver.decoder_compact import decode_frame_compact
+from screen_airdrop.common.transport.protocol_basic import FRAME_DATA
+from screen_airdrop.receiver.transport.compact.decoder import decode_frame_compact
 
 
 @pytest.mark.real_data

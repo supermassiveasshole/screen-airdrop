@@ -11,7 +11,7 @@ from bench.benchmark_common import (
     protocol_safe_chunk_size,
 )
 
-from screen_airdrop.common.protocol_interface import LayoutInfo
+from screen_airdrop.common.transport.protocol_interface import LayoutInfo
 
 
 def _layout(capacity_bytes: int) -> LayoutInfo:

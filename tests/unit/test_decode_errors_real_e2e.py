@@ -12,8 +12,8 @@ from screen_airdrop.receiver.decode_errors import (
     LayeredBodyDecodeError,
     LayeredBootstrapDecodeError,
 )
-from screen_airdrop.receiver.decoder_gray4 import decode_frame_gray4
-from screen_airdrop.receiver.decoder_layered import decode_frame_layered
+from screen_airdrop.receiver.transport.gray4.decoder import decode_frame_gray4
+from screen_airdrop.receiver.transport.layered.decoder import decode_frame_layered
 from screen_airdrop.receiver.reporting.report import Gray4Report, LayeredReport
 
 
@@ -82,8 +82,8 @@ class TestReportFinalization:
 
     def test_gray4_report_finalization_with_failures(self):
         """Gray4Report should finalize with failure information."""
-        from screen_airdrop.receiver.assembler import ChunkAssembler
-        from screen_airdrop.receiver.stats import TransferStats
+        from screen_airdrop.receiver.information.assembler import ChunkAssembler
+        from screen_airdrop.receiver.reporting.transfer_stats import TransferStats
 
         # Create report and record failures
         report = Gray4Report()
@@ -142,8 +142,8 @@ class TestReportFinalization:
 
     def test_layered_report_finalization_with_failures(self):
         """LayeredReport should finalize with failure information."""
-        from screen_airdrop.receiver.assembler import ChunkAssembler
-        from screen_airdrop.receiver.stats import TransferStats
+        from screen_airdrop.receiver.information.assembler import ChunkAssembler
+        from screen_airdrop.receiver.reporting.transfer_stats import TransferStats
 
         # Create report and record failures
         report = LayeredReport()
@@ -197,8 +197,8 @@ class TestReportFinalization:
         import json
         import tempfile
 
-        from screen_airdrop.receiver.assembler import ChunkAssembler
-        from screen_airdrop.receiver.stats import TransferStats
+        from screen_airdrop.receiver.information.assembler import ChunkAssembler
+        from screen_airdrop.receiver.reporting.transfer_stats import TransferStats
 
         report = Gray4Report()
         report.attach_decode_failure(

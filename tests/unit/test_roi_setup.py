@@ -5,9 +5,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from screen_airdrop.receiver.config import ReceiverConfig
-from screen_airdrop.receiver.roi_policy import RoiPolicy
-from screen_airdrop.receiver.roi_setup import _parse_region, setup_roi
-from screen_airdrop.receiver.stats import TransferStats
+from screen_airdrop.receiver.reporting.transfer_stats import TransferStats
+from screen_airdrop.receiver.roi.policy import RoiPolicy
+from screen_airdrop.receiver.roi.setup import _parse_region, setup_roi
 
 
 def test_parse_region_valid():
@@ -95,8 +95,8 @@ def test_setup_roi_manual_mode_requires_roi():
         setup_roi(config, roi_policy, stats)
 
 
-@patch("screen_airdrop.receiver.roi_setup.select_region")
-@patch("screen_airdrop.receiver.roi_setup.get_monitor_region")
+@patch("screen_airdrop.receiver.roi.setup.select_region")
+@patch("screen_airdrop.receiver.roi.setup.get_monitor_region")
 def test_setup_roi_interactive_selection(mock_get_monitor, mock_select):
     """Test setup_roi with interactive selection."""
     mock_get_monitor.return_value = (0, 0, 1920, 1080)
@@ -122,8 +122,8 @@ def test_setup_roi_interactive_selection(mock_get_monitor, mock_select):
     stats.mark_manual_roi.assert_called_once_with(switched=False)
 
 
-@patch("screen_airdrop.receiver.roi_setup.select_region")
-@patch("screen_airdrop.receiver.roi_setup.get_monitor_region")
+@patch("screen_airdrop.receiver.roi.setup.select_region")
+@patch("screen_airdrop.receiver.roi.setup.get_monitor_region")
 def test_setup_roi_interactive_selection_canceled(mock_get_monitor, mock_select):
     """Test setup_roi raises RuntimeError if interactive selection is canceled."""
     mock_get_monitor.return_value = (0, 0, 1920, 1080)

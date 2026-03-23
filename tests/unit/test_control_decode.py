@@ -1,6 +1,6 @@
 import numpy as np
 
-from screen_airdrop.receiver.control_decode import (
+from screen_airdrop.receiver.transport.control_decode import (
     _try_unpack_candidates,
     decode_binary_control_header,
 )

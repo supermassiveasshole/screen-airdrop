@@ -1,4 +1,4 @@
-from screen_airdrop.receiver.stats import TransferStats
+from screen_airdrop.receiver.reporting.transfer_stats import TransferStats
 
 
 def test_stats_snapshot_and_finalize():

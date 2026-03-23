@@ -4,7 +4,7 @@ from pathlib import Path
 import cv2
 import pytest
 
-from screen_airdrop.receiver.decoder_basic import decode_frame_basic
+from screen_airdrop.receiver.transport.basic.decoder import decode_frame_basic
 
 
 @pytest.mark.real_data

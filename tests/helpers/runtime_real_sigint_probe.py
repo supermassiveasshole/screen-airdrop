@@ -6,9 +6,9 @@ import sys
 import time
 from multiprocessing import resource_tracker
 
-from screen_airdrop.receiver.assembler import ChunkAssembler
-from screen_airdrop.receiver.capture_mss import ScreenCapture
-from screen_airdrop.receiver.screen_live_runtime import ScreenLiveRuntime
+from screen_airdrop.receiver.information.assembler import ChunkAssembler
+from screen_airdrop.receiver.runtime.screen_capture import ScreenCapture
+from screen_airdrop.receiver.pipeline.live import ScreenLiveRuntime
 
 
 def main() -> None:

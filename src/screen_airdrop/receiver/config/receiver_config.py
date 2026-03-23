@@ -31,6 +31,8 @@ class ReceiverConfig:
     # Decode configuration
     decode_workers: int
     prep_process: int
+    frame_queue_size: int
+    result_queue_size: int
     replay_geometry_mode: str
 
     # Capture configuration
@@ -78,6 +80,8 @@ class ReceiverConfig:
             # Decode
             decode_workers=args.decode_workers,
             prep_process=args.prep_process,
+            frame_queue_size=args.frame_queue_size,
+            result_queue_size=args.result_queue_size,
             replay_geometry_mode=args.replay_geometry_mode,
             # Capture
             capture_fps=args.capture_fps,
@@ -113,6 +117,12 @@ class ReceiverConfig:
 
         if self.decode_workers < 0:
             raise ValueError("decode-workers must be non-negative")
+
+        if self.frame_queue_size <= 0:
+            raise ValueError("frame-queue-size must be positive")
+
+        if self.result_queue_size <= 0:
+            raise ValueError("result-queue-size must be positive")
 
         if self.replay_geometry_mode not in {"stateful", "stateless"}:
             raise ValueError("replay-geometry-mode must be stateful or stateless")

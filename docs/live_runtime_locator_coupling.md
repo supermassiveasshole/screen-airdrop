@@ -77,7 +77,7 @@ class GeometryTracker:
 
 ### 4. Decoder仍然耦合Locator
 
-**位置：** [protocol_adapter_*.py](src/screen_airdrop/receiver/protocol_adapter_basic.py)
+**位置：** [protocol_adapter_*.py](src/screen_airdrop/receiver/transport/basic/adapter.py)
 
 ```python
 class BasicProtocolDecoder:
@@ -302,7 +302,7 @@ def _decode_worker_main(
 ### 阶段5: 简化Decoder接口
 
 ```python
-# src/screen_airdrop/receiver/protocol_adapter_basic.py
+# src/screen_airdrop/receiver/transport/basic/adapter.py
 
 class BasicProtocolDecoder:
     def __init__(
@@ -344,7 +344,7 @@ class BasicProtocolDecoder:
 ### 阶段6: 修改ScreenLiveRuntime初始化
 
 ```python
-# src/screen_airdrop/receiver/screen_live_runtime.py
+# src/screen_airdrop/receiver/pipeline/live.py
 
 class ScreenLiveRuntime:
     def __init__(

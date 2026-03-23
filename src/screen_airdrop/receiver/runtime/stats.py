@@ -8,7 +8,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Protocol, cast
 
-from screen_airdrop.receiver.protocol_observability import make_protocol_report_adapter
+from screen_airdrop.receiver.transport.layered.observability import (
+    make_protocol_report_adapter,
+)
 
 
 class ProtocolReportAdapterProtocol(Protocol):

@@ -1,7 +1,7 @@
 # OGRB Protocol Specification
 
 Version: 3.0-draft  
-Status: Design draft  
+Status: Design draft with real-generation systematic-only phase active in code  
 Target system: Screen-Airdrop visual transmission pipeline
 
 ## 1. Introduction
@@ -18,6 +18,14 @@ The purpose of this rewrite is to make the protocol implementable without semant
 4. compatibility with existing Screen-Airdrop visual designs, especially layered rendering, compact control headers, and gray4 modulation
 
 This specification does not require erasure coding to be implemented immediately. It defines the architecture so that Phase 4 (erasure coding) and Phase 5 (OGRB scheduling) can be added without redesigning the visual layer again.
+
+Current implementation status:
+
+1. The codebase is in a real-generation systematic-only phase.
+2. Sender payload chunks are partitioned into non-overlapping systematic generations before transport encoding.
+3. Receiver transport adapters normalize a decoded data frame into exactly one systematic unit candidate, and generation control binds that unit to a real semantic generation.
+4. Current transport `epoch_id` remains broadcast-round metadata and is not the same thing as semantic `generation_id`.
+5. No coded units, equation identities, rank tracking, or OGRB policy are implemented yet.
 
 ## 2. System Overview
 

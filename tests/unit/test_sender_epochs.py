@@ -1,6 +1,6 @@
-from screen_airdrop.sender.controller import build_encoded_frames
-from screen_airdrop.sender.encoder_gray4 import frame_capacity_bytes_gray4
-from screen_airdrop.sender.schedule_policy import BroadcastSchedule
+from screen_airdrop.sender.application.controller import build_encoded_frames
+from screen_airdrop.sender.scheduling.broadcast_schedule import BroadcastSchedule
+from screen_airdrop.sender.transport.gray4.encoder import frame_capacity_bytes_gray4
 
 
 def test_epochs_zero_means_infinite_loop(tmp_path):
@@ -143,6 +143,51 @@ def test_schedule_policy_can_repeat_data_chunks_with_realizations(tmp_path):
     assert int(data_items[0]["realization_count"]) == 2
     assert int(data_items[1]["realization_count"]) == 2
     assert int(data_items[0]["frame_id"]) != int(data_items[1]["frame_id"])
+    assert int(data_items[0]["generation_id"]) == 0
+    assert int(data_items[1]["generation_id"]) == 0
+    assert int(data_items[0]["generation_size"]) == int(first["metadata"]["payload_chunk_count"])
+    assert data_items[0]["transmission_unit"].source_index == 1
+    assert data_items[0]["transmission_unit"].generation_id == 0
+    assert data_items[0]["transmission_unit"].generation_size == int(
+        first["metadata"]["payload_chunk_count"]
+    )
+
+
+def test_sender_splits_payload_into_multiple_generations(tmp_path):
+    sample = tmp_path / "sample.txt"
+    sample.write_text("abcdefghij" * 400, encoding="utf-8")
+
+    gen = build_encoded_frames(
+        input_path=str(sample),
+        protocol="basic",
+        compress="none",
+        sync_frames=0,
+        chunk_size=256,
+        systematic_generation_size=3,
+        epochs=1,
+    )
+
+    items = [next(gen) for _ in range(24)]
+    first = items[0]
+    generation_controls = [
+        item for item in items if item.get("control_kind") == "generation"
+    ]
+    data_items = [item for item in items if item.get("plane") == "data"]
+    generation_ids = []
+    for item in generation_controls:
+        generation_id = int(item["generation_id"])
+        if generation_id not in generation_ids:
+            generation_ids.append(generation_id)
+
+    assert int(first["metadata"]["systematic_generation_count"]) >= 2
+    assert len(first["metadata"]["systematic_generations"]) == int(
+        first["metadata"]["systematic_generation_count"]
+    )
+    assert len(generation_controls) >= 2
+    assert generation_ids[:2] == [0, 1]
+    assert int(data_items[0]["chunk_id"]) == 1
+    assert int(data_items[0]["global_chunk_id"]) == 1
+    assert int(data_items[0]["generation_id"]) == 0
 
 
 def test_chunk_fill_ratio_can_use_full_frame_capacity(tmp_path):

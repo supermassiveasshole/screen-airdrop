@@ -1,4 +1,4 @@
-from screen_airdrop.common.layout_basic import LayoutInfoBasic, crc16_ccitt_false
+from screen_airdrop.common.transport.layout_basic import LayoutInfoBasic, crc16_ccitt_false
 
 
 def test_layout_pack_unpack_crc_roundtrip():

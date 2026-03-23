@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from screen_airdrop.receiver.protocol_observability import (
+from screen_airdrop.receiver.transport.layered.observability import (
     Gray4ReportAdapter,
     LayeredReportAdapter,
 )

@@ -13,9 +13,9 @@ from typing import Any, List, Optional, Protocol, Sequence, Tuple, cast
 
 import numpy as np
 
-from screen_airdrop.receiver.capture_mss import get_monitor_region
 from screen_airdrop.receiver.decode_errors import DecodeError
-from screen_airdrop.receiver.protocol_decoder_factory import create_protocol_decoder
+from screen_airdrop.receiver.locator.state_machine import GeometryState
+from screen_airdrop.receiver.locator.window import resolve_window_region
 from screen_airdrop.receiver.runtime.events import (
     DecodeAssignment,
     DecodeCompletion,
@@ -25,8 +25,8 @@ from screen_airdrop.receiver.runtime.events import (
     PrepFingerprintEvent,
 )
 from screen_airdrop.receiver.runtime.frame_preprocessor import compute_fingerprint
-from screen_airdrop.receiver.runtime.geometry_tracker import GeometryState
-from screen_airdrop.receiver.window_locator import resolve_window_region
+from screen_airdrop.receiver.runtime.screen_capture import get_monitor_region
+from screen_airdrop.receiver.transport.decoder_factory import create_protocol_decoder
 
 
 class QueueLike(Protocol):
@@ -152,7 +152,7 @@ def _layered_geometry_from_runtime(state: Optional[GeometryState]) -> Optional[o
         or state.homography_inv is None
     ):
         return None
-    from screen_airdrop.receiver.decoder_layered import LayeredGeometryState
+    from screen_airdrop.receiver.transport.layered.decoder import LayeredGeometryState
 
     return LayeredGeometryState(
         quad_src=np.array(state.quad_src, copy=True),
@@ -204,6 +204,7 @@ def _geometry_state_from_meta(
 
 def _meta_snapshot(meta: object) -> object:
     return SimpleNamespace(
+        det_bbox=getattr(meta, "det_bbox", None),
         mask_id=getattr(meta, "mask_id", -1),
         body_profile_id=getattr(meta, "body_profile_id", 0),
         body_profile_name=getattr(meta, "body_profile_name", ""),
@@ -750,6 +751,8 @@ def decode_worker_main(
                         success=True,
                         chunk_id=int(getattr(header, "chunk_id", 0)),
                         payload=decoded.payload,
+                        control_kind=str(getattr(decoded, "control_kind", "") or ""),
+                        transmission_unit=getattr(decoded, "transmission_unit", None),
                         frame_id=int(getattr(header, "frame_id", 0)),
                         frame_type=int(getattr(header, "frame_type", 0)),
                         meta=_meta_snapshot(meta),

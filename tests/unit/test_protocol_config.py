@@ -1,6 +1,6 @@
 """Tests for protocol_config module."""
 
-from screen_airdrop.receiver.protocol_config import PROTOCOL_GEOMETRY, get_protocol_geometry
+from screen_airdrop.receiver.transport.config import PROTOCOL_GEOMETRY, get_protocol_geometry
 
 
 def test_protocol_geometry_constants():

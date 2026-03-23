@@ -10,14 +10,17 @@ from typing import Any, Dict, Optional, Tuple
 import cv2
 import numpy as np
 
-from screen_airdrop.common.layout_basic import (
+from screen_airdrop.common.transport.layout_basic import (
     DEFAULT_FINDER,
     DEFAULT_GRID_H,
     DEFAULT_GRID_W,
     DEFAULT_GUARD,
 )
-from screen_airdrop.receiver.detector_basic import detect_symbol_bbox, detect_symbol_quad
-from screen_airdrop.sender.encoder_basic import BasicLayout, build_layout_basic
+from screen_airdrop.receiver.transport.basic.detector import (
+    detect_symbol_bbox,
+    detect_symbol_quad,
+)
+from screen_airdrop.sender.transport.basic.encoder import BasicLayout, build_layout_basic
 
 
 class LocateFailReason(str, enum.Enum):

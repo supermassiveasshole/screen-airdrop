@@ -4,7 +4,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 
-from screen_airdrop.receiver.detector_basic import (
+from screen_airdrop.receiver.transport.basic.detector import (
     _bbox_from_non_black,
     detect_symbol_bbox,
 )

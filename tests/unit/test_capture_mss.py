@@ -1,6 +1,6 @@
 import numpy as np
 
-from screen_airdrop.receiver.capture_mss import compute_frame_diff, screenshot_to_bgr
+from screen_airdrop.receiver.runtime.screen_capture import compute_frame_diff, screenshot_to_bgr
 
 
 class _FakeShot:

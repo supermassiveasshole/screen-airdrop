@@ -1,39 +1,49 @@
-"""Reporting utilities for screen-airdrop receiver.
+"""Stable reporting facade for receiver pipelines and application wiring."""
 
-This module provides the new collector-based reporting system.
+from __future__ import annotations
 
-New architecture:
-- Report: Pure data container
-- Collector: Base interface for metric collectors
-- EventCollector: Event-driven collector interface
-- StatsCollector: Wraps Stats objects
-- AssemblerCollector: Extracts assembler state
-- ProtocolCollector: Protocol-specific debug info (Gray4, Layered)
-- ReportCollector: Coordinates all collectors
-"""
+from typing import TYPE_CHECKING
 
-# New architecture exports
-from screen_airdrop.receiver.reporting.assembler_collector import AssemblerCollector
-from screen_airdrop.receiver.reporting.collector import Collector, EventCollector
-from screen_airdrop.receiver.reporting.protocol_collector import (
-    Gray4ProtocolCollector,
-    LayeredProtocolCollector,
-    ProtocolCollector,
-    make_protocol_collector,
-)
-from screen_airdrop.receiver.reporting.report import Report
-from screen_airdrop.receiver.reporting.report_collector import ReportCollector
-from screen_airdrop.receiver.reporting.stats_collector import StatsCollector
+if TYPE_CHECKING:
+    from screen_airdrop.receiver.reporting.factory import (
+        create_named_progress_reporter,
+        create_progress_reporter,
+        create_report_collector,
+        create_stats_formatter,
+    )
+    from screen_airdrop.receiver.reporting.interfaces import (
+        ProgressReporterProtocol,
+        ReportCollectorProtocol,
+    )
+    from screen_airdrop.receiver.reporting.report import Report
 
 __all__ = [
     "Report",
-    "Collector",
-    "EventCollector",
-    "StatsCollector",
-    "AssemblerCollector",
-    "ProtocolCollector",
-    "Gray4ProtocolCollector",
-    "LayeredProtocolCollector",
-    "ReportCollector",
-    "make_protocol_collector",
+    "ProgressReporterProtocol",
+    "ReportCollectorProtocol",
+    "create_named_progress_reporter",
+    "create_progress_reporter",
+    "create_report_collector",
+    "create_stats_formatter",
 ]
+
+
+def __getattr__(name):
+    if name in {
+        "create_named_progress_reporter",
+        "create_progress_reporter",
+        "create_report_collector",
+        "create_stats_formatter",
+    }:
+        from screen_airdrop.receiver.reporting import factory as _factory
+
+        return getattr(_factory, name)
+    if name in {"ProgressReporterProtocol", "ReportCollectorProtocol"}:
+        from screen_airdrop.receiver.reporting import interfaces as _interfaces
+
+        return getattr(_interfaces, name)
+    if name == "Report":
+        from screen_airdrop.receiver.reporting.report import Report
+
+        return Report
+    raise AttributeError(name)

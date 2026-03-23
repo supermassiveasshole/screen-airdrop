@@ -4,7 +4,7 @@ import importlib.util
 import sys
 from pathlib import Path
 
-from screen_airdrop.common.protocol_basic import FRAME_DATA, FrameHeaderBasic
+from screen_airdrop.common.transport.protocol_basic import FRAME_DATA, FrameHeaderBasic
 
 
 def _load_module():

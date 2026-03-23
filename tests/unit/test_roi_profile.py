@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from screen_airdrop.receiver.roi_profile import load_profile, save_profile
+from screen_airdrop.receiver.roi.profile import load_profile, save_profile
 
 
 def test_roi_profile_roundtrip(tmp_path: Path):

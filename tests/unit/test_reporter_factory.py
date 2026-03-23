@@ -1,8 +1,8 @@
 """Tests for reporter_factory module."""
 
-from screen_airdrop.receiver.reporter_factory import create_progress_reporter
-from screen_airdrop.receiver.runtime.console_reporter import ConsoleProgressReporter
-from screen_airdrop.receiver.runtime.stats_formatter import (
+from screen_airdrop.receiver.reporting.console import ConsoleProgressReporter
+from screen_airdrop.receiver.reporting.factory import create_progress_reporter
+from screen_airdrop.receiver.reporting.formatters import (
     CompactStatsFormatter,
     ScreenLiveStatsFormatter,
 )

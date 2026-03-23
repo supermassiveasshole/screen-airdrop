@@ -6,14 +6,14 @@ import cv2
 import numpy as np
 import pytest
 
-from screen_airdrop.common.protocol_basic import FrameHeaderBasic
-from screen_airdrop.common.protocol_layered import (
+from screen_airdrop.common.transport.protocol_basic import FrameHeaderBasic
+from screen_airdrop.common.transport.protocol_layered import (
     LAYERED_BODY_PROFILE_DENSE,
     LAYERED_BODY_PROFILE_ROBUST,
     LAYERED_BOOTSTRAP_ROWS,
 )
-from screen_airdrop.receiver.decoder_layered import decode_frame_layered
-from screen_airdrop.sender.encoder_layered import (
+from screen_airdrop.receiver.transport.layered.decoder import decode_frame_layered
+from screen_airdrop.sender.transport.layered.encoder import (
     build_layout_layered,
     encode_frame_layered,
     frame_capacity_bytes_layered,

@@ -1,8 +1,8 @@
 import numpy as np
 
-from screen_airdrop.common.protocol_basic import FRAME_DATA, FrameHeaderBasic
+from screen_airdrop.common.transport.protocol_basic import FRAME_DATA, FrameHeaderBasic
 from screen_airdrop.receiver.locator.basic import LocateError, LocatorConfig, locate_frame
-from screen_airdrop.sender.encoder_basic import encode_frame_basic
+from screen_airdrop.sender.transport.basic.encoder import encode_frame_basic
 
 
 def test_locator_v31_returns_modules_and_quad_contract():

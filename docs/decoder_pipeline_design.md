@@ -5,15 +5,15 @@
 本文档描述的实现对应当前仓库中的 live screen runtime，核心入口和实现分散在以下文件：
 
 - [src/screen_airdrop/receiver/cli.py](/Users/waldron/Code/screen-airdrop/src/screen_airdrop/receiver/cli.py)
-- [src/screen_airdrop/receiver/pipeline_factory.py](/Users/waldron/Code/screen-airdrop/src/screen_airdrop/receiver/pipeline_factory.py)
-- [src/screen_airdrop/receiver/screen_live_runtime.py](/Users/waldron/Code/screen-airdrop/src/screen_airdrop/receiver/screen_live_runtime.py)
+- [src/screen_airdrop/receiver/application/pipeline_factory.py](/Users/waldron/Code/screen-airdrop/src/screen_airdrop/receiver/application/pipeline_factory.py)
+- [src/screen_airdrop/receiver/pipeline/live.py](/Users/waldron/Code/screen-airdrop/src/screen_airdrop/receiver/pipeline/live.py)
 - [src/screen_airdrop/receiver/runtime/coordinator.py](/Users/waldron/Code/screen-airdrop/src/screen_airdrop/receiver/runtime/coordinator.py)
 - [src/screen_airdrop/receiver/runtime/workers.py](/Users/waldron/Code/screen-airdrop/src/screen_airdrop/receiver/runtime/workers.py)
 - [src/screen_airdrop/receiver/runtime/slot_manager.py](/Users/waldron/Code/screen-airdrop/src/screen_airdrop/receiver/runtime/slot_manager.py)
 - [src/screen_airdrop/receiver/runtime/prep_strategy.py](/Users/waldron/Code/screen-airdrop/src/screen_airdrop/receiver/runtime/prep_strategy.py)
 - [src/screen_airdrop/receiver/runtime/geometry_tracker.py](/Users/waldron/Code/screen-airdrop/src/screen_airdrop/receiver/runtime/geometry_tracker.py)
 - [src/screen_airdrop/receiver/runtime/stats.py](/Users/waldron/Code/screen-airdrop/src/screen_airdrop/receiver/runtime/stats.py)
-- [src/screen_airdrop/receiver/runtime/pipeline_runner.py](/Users/waldron/Code/screen-airdrop/src/screen_airdrop/receiver/runtime/pipeline_runner.py)
+- [src/screen_airdrop/receiver/pipeline/runner.py](/Users/waldron/Code/screen-airdrop/src/screen_airdrop/receiver/pipeline/runner.py)
 
 ## 1. 设计目标
 
@@ -139,8 +139,8 @@ live screen receiver 由四层组成：
 代码入口：
 
 - CLI: [src/screen_airdrop/receiver/cli.py](/Users/waldron/Code/screen-airdrop/src/screen_airdrop/receiver/cli.py)
-- Factory: [src/screen_airdrop/receiver/pipeline_factory.py](/Users/waldron/Code/screen-airdrop/src/screen_airdrop/receiver/pipeline_factory.py)
-- Runner: [src/screen_airdrop/receiver/runtime/pipeline_runner.py](/Users/waldron/Code/screen-airdrop/src/screen_airdrop/receiver/runtime/pipeline_runner.py)
+- Factory: [src/screen_airdrop/receiver/application/pipeline_factory.py](/Users/waldron/Code/screen-airdrop/src/screen_airdrop/receiver/application/pipeline_factory.py)
+- Runner: [src/screen_airdrop/receiver/pipeline/runner.py](/Users/waldron/Code/screen-airdrop/src/screen_airdrop/receiver/pipeline/runner.py)
 
 ## 4. 进程与线程模型
 
@@ -161,7 +161,7 @@ live screen receiver 由四层组成：
 
 `ScreenLiveRuntime.start()` 启动 worker 子进程后，不在主线程直接跑 coordinator，而是起一个非 daemon 线程：
 
-- [src/screen_airdrop/receiver/screen_live_runtime.py](/Users/waldron/Code/screen-airdrop/src/screen_airdrop/receiver/screen_live_runtime.py)
+- [src/screen_airdrop/receiver/pipeline/live.py](/Users/waldron/Code/screen-airdrop/src/screen_airdrop/receiver/pipeline/live.py)
 
 这样做的原因：
 
@@ -204,13 +204,13 @@ runtime 初始化时又会用：
 
 经过 `resolve_window_region(...)` 得到最终 active region：
 
-- [src/screen_airdrop/receiver/screen_live_runtime.py](/Users/waldron/Code/screen-airdrop/src/screen_airdrop/receiver/screen_live_runtime.py)
+- [src/screen_airdrop/receiver/pipeline/live.py](/Users/waldron/Code/screen-airdrop/src/screen_airdrop/receiver/pipeline/live.py)
 
 ### 5.3 pipeline seed ROI 的来源
 
 `pipeline_factory._build_pipeline_seed_roi_local(...)` 会把绝对屏幕坐标的 forced ROI 转换到局部 frame 坐标，作为 locator 的初始搜索区域：
 
-- [src/screen_airdrop/receiver/pipeline_factory.py](/Users/waldron/Code/screen-airdrop/src/screen_airdrop/receiver/pipeline_factory.py)
+- [src/screen_airdrop/receiver/application/pipeline_factory.py](/Users/waldron/Code/screen-airdrop/src/screen_airdrop/receiver/application/pipeline_factory.py)
 
 这意味着：
 
@@ -236,7 +236,7 @@ runtime 初始化时又会用：
 
 slot 数量不是固定常数，而是基于 capture_fps、decode_workers、dump 是否开启计算：
 
-- [src/screen_airdrop/receiver/screen_live_runtime.py](/Users/waldron/Code/screen-airdrop/src/screen_airdrop/receiver/screen_live_runtime.py)
+- [src/screen_airdrop/receiver/pipeline/live.py](/Users/waldron/Code/screen-airdrop/src/screen_airdrop/receiver/pipeline/live.py)
 
 当前逻辑：
 
@@ -690,7 +690,7 @@ assembler 在主进程中维护：
 
 实现：
 
-- [src/screen_airdrop/receiver/screen_live_runtime.py](/Users/waldron/Code/screen-airdrop/src/screen_airdrop/receiver/screen_live_runtime.py)
+- [src/screen_airdrop/receiver/pipeline/live.py](/Users/waldron/Code/screen-airdrop/src/screen_airdrop/receiver/pipeline/live.py)
 
 这套顺序的目的不是“优雅”，而是避免：
 

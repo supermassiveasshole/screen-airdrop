@@ -5,7 +5,7 @@ from unittest.mock import patch
 import numpy as np
 
 from screen_airdrop.receiver.cli import main as receiver_main
-from screen_airdrop.sender.controller import build_encoded_frames, run_sender
+from screen_airdrop.sender.application.controller import build_encoded_frames, run_sender
 
 from ..helpers.dump_replay import dump_and_replay
 from ..helpers.protocol_fixture_factory import create_payload_tree
@@ -121,7 +121,7 @@ def test_sender_report_includes_control_plane_schema(tmp_path: Path):
         def close(self):
             return None
 
-    with patch("screen_airdrop.sender.controller.CV2Renderer", _FakeRenderer):
+    with patch("screen_airdrop.sender.application.controller.CV2Renderer", _FakeRenderer):
         code = run_sender(
             input_path=str(src),
             dump_frames=str(frame_dir),
@@ -218,3 +218,56 @@ def test_gray4_dump_replay_report_has_protocol_debug(tmp_path: Path):
     assert replay_report["status"] == "ok"
     assert replay_report["missing_chunks"] == 0
     assert (out_dir / src.name).exists()
+
+
+def test_replay_loopback_with_multiple_systematic_generations(tmp_path: Path):
+    src = tmp_path / "src-multi-gen"
+    src.mkdir()
+    (src / "payload.bin").write_bytes((b"0123456789abcdef" * 1024))
+
+    encoded = list(
+        build_encoded_frames(
+            input_path=str(src),
+            block_size=6,
+            chunk_size=256,
+            compress="none",
+            systematic_generation_size=3,
+            sync_frames=4,
+            epochs=1,
+        )
+    )
+
+    frame_dir = tmp_path / "frames"
+    frame_dir.mkdir()
+    for i, item in enumerate(encoded):
+        np.save(frame_dir / "{0:06d}.npy".format(i), item["image"])
+
+    out_dir = tmp_path / "out"
+    report = tmp_path / "report.json"
+    code = receiver_main(
+        [
+            "--source",
+            "replay",
+            "--frames-dir",
+            str(frame_dir),
+            "--output-dir",
+            str(out_dir),
+            "--block-size",
+            "6",
+            "--report-json",
+            str(report),
+            "--max-seconds",
+            "60",
+            "--stats-interval",
+            "0.1",
+        ]
+    )
+    assert code == 0
+
+    rep = json.loads(report.read_text(encoding="utf-8"))
+    assert rep["status"] == "ok"
+    assert rep["missing_chunks"] == 0
+    assert len(rep["control_generations_seen"]) >= 2
+    restored = out_dir / src.name
+    assert restored.exists()
+    assert _dir_hash(src) == _dir_hash(restored)

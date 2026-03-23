@@ -8,15 +8,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from screen_airdrop.receiver.reporting import (
-    AssemblerCollector,
+from screen_airdrop.receiver.reporting.protocol_collector import (
     Gray4ProtocolCollector,
     LayeredProtocolCollector,
-    Report,
-    ReportCollector,
-    StatsCollector,
     make_protocol_collector,
 )
+from screen_airdrop.receiver.reporting.report import Report
+from screen_airdrop.receiver.reporting.report_collector import ReportCollector
 
 
 class TestReport:

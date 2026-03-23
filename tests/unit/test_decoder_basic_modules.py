@@ -1,6 +1,6 @@
-from screen_airdrop.common.protocol_basic import FRAME_DATA, FrameHeaderBasic
-from screen_airdrop.receiver.decoder_basic import decode_frame_basic
-from screen_airdrop.sender.encoder_basic import build_symbol_modules_basic, encode_frame_basic
+from screen_airdrop.common.transport.protocol_basic import FRAME_DATA, FrameHeaderBasic
+from screen_airdrop.receiver.transport.basic.decoder import decode_frame_basic
+from screen_airdrop.sender.transport.basic.encoder import build_symbol_modules_basic, encode_frame_basic
 
 
 def test_decode_v31_from_rendered_frame():

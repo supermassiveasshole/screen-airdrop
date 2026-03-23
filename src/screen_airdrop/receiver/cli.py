@@ -9,16 +9,17 @@ import os
 import signal
 import sys
 
-from screen_airdrop.receiver.assembler import ChunkAssembler
-from screen_airdrop.receiver.capture_mss import ScreenCapture
+from screen_airdrop.receiver.application.pipeline_factory import create_pipeline
+from screen_airdrop.receiver.application.replay_source import FrameReplaySource
 from screen_airdrop.receiver.config import ReceiverConfig
-from screen_airdrop.receiver.frame_replay_source import FrameReplaySource
-from screen_airdrop.receiver.pipeline_factory import create_pipeline
-from screen_airdrop.receiver.reporter_factory import create_progress_reporter
-from screen_airdrop.receiver.roi_policy import RoiPolicy
-from screen_airdrop.receiver.roi_setup import setup_roi
-from screen_airdrop.receiver.runtime.pipeline_runner import PipelineRunner
-from screen_airdrop.receiver.stats import TransferStats
+from screen_airdrop.receiver.debug.snapshot import DebugSnapshotManager
+from screen_airdrop.receiver.information import ChunkAssembler
+from screen_airdrop.receiver.pipeline.runner import PipelineRunner
+from screen_airdrop.receiver.reporting.factory import create_progress_reporter
+from screen_airdrop.receiver.reporting.transfer_stats import TransferStats
+from screen_airdrop.receiver.roi.policy import RoiPolicy
+from screen_airdrop.receiver.roi.setup import setup_roi
+from screen_airdrop.receiver.runtime.screen_capture import ScreenCapture
 
 
 def _build_source(config: ReceiverConfig, capture_region):
@@ -62,6 +63,67 @@ def _configure_debug_capture(config: ReceiverConfig, source) -> None:
     print(
         f"debug enabled: dir={config.debug_dir} interval={config.debug_interval}s "
         f"max_frames={config.debug_max_frames}"
+    )
+
+
+def _dump_debug_snapshot(
+    *,
+    debug_dir: str,
+    frame_index: int,
+    frame,
+    threshold: int,
+    forced_roi_local,
+    forced_roi_abs,
+    capture_region,
+    decode_error,
+    protocol_path_used: str,
+    track_roi_local,
+    det_bbox_local,
+    selected_block_size=None,
+    detect_mode_used="",
+    det_confidence: float = 0.0,
+    decode_attempt_total: int = 0,
+    fallback_hits: int = 0,
+    control_plane_kinds=None,
+    control_layout=None,
+    control_session=None,
+    control_generation=None,
+    control_generations_seen=None,
+    decoded_chunk_id=None,
+    decoded_payload=None,
+):
+    """Write a single debug snapshot for CLI/debug tests."""
+    manager = DebugSnapshotManager(
+        debug_dir=debug_dir,
+        debug_max_frames=max(1, int(frame_index) + 1),
+        debug_interval=0.0,
+    )
+    manager.dump_snapshot(
+        frame_index=frame_index,
+        frame=frame,
+        threshold=threshold,
+        forced_roi_local=forced_roi_local,
+        forced_roi_abs=forced_roi_abs,
+        capture_region=capture_region,
+        decode_error=decode_error,
+        protocol_path_used=protocol_path_used,
+        track_roi_local=track_roi_local,
+        det_bbox_local=det_bbox_local,
+        v31_meta={
+            "selected_block_size": selected_block_size,
+            "detect_mode_used": detect_mode_used,
+            "det_confidence": det_confidence,
+            "decode_attempt_total": decode_attempt_total,
+            "fallback_hits": fallback_hits,
+        },
+        control_plane_kinds=control_plane_kinds,
+        control_layout=control_layout,
+        control_session=control_session,
+        control_generation=control_generation,
+        control_generations_seen=control_generations_seen,
+        decoded_chunk_id=decoded_chunk_id,
+        decoded_payload=decoded_payload,
+        protocol=protocol_path_used,
     )
 
 

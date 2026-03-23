@@ -11,8 +11,8 @@ from screen_airdrop.common.ecc_rs import (
     encode_rs_bytes,
     rs_encoded_size,
 )
-from screen_airdrop.common.protocol_basic import FrameHeaderBasic
-from screen_airdrop.common.protocol_layered import (
+from screen_airdrop.common.transport.protocol_basic import FrameHeaderBasic
+from screen_airdrop.common.transport.protocol_layered import (
     BODY_META_STRUCT,
     BODY_TRAILER_SIZE,
     LAYERED_BODY_PROFILE_DENSE,
@@ -32,9 +32,9 @@ from screen_airdrop.common.protocol_layered import (
     layered_short_session_tag,
     normalize_layered_session_id,
 )
-from screen_airdrop.receiver.decoder_compact import _run_locator as _run_locator_compact
-from screen_airdrop.receiver.decoder_gray4 import _sample_gray4_modules
-from screen_airdrop.receiver.decoder_layered import (
+from screen_airdrop.receiver.transport.compact.decoder import _run_locator as _run_locator_compact
+from screen_airdrop.receiver.transport.gray4.decoder import _sample_gray4_modules
+from screen_airdrop.receiver.transport.layered.decoder import (
     LayeredDecodeTraceError,
     _control_template_match,
     _decode_bootstrap_control_band,
@@ -42,8 +42,8 @@ from screen_airdrop.receiver.decoder_layered import (
     decode_frame_layered_with_geometry,
 )
 from screen_airdrop.receiver.locator.basic import LocatorConfig
-from screen_airdrop.receiver.protocol_adapter_layered import LayeredProtocolDecoder
-from screen_airdrop.sender.encoder_layered import (
+from screen_airdrop.receiver.transport.layered.adapter import LayeredProtocolDecoder
+from screen_airdrop.sender.transport.layered.encoder import (
     build_layout_layered,
     encode_frame_layered,
     frame_capacity_bytes_layered,

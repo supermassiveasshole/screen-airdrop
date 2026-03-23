@@ -2,13 +2,23 @@
 
 from unittest.mock import MagicMock
 
-from screen_airdrop.receiver.assembler import ChunkAssembler
-from screen_airdrop.receiver.capture_mss import ScreenCapture
+from screen_airdrop.receiver.application.pipeline_factory import create_pipeline
+from screen_airdrop.receiver.application.replay_source import FrameReplaySource
 from screen_airdrop.receiver.config import ReceiverConfig
-from screen_airdrop.receiver.frame_replay_source import FrameReplaySource
-from screen_airdrop.receiver.pipeline_factory import create_pipeline
-from screen_airdrop.receiver.runtime.replay_pipeline import ReplayPipeline
-from screen_airdrop.receiver.screen_live_runtime import ScreenLiveRuntime
+from screen_airdrop.receiver.information.assembler import ChunkAssembler
+from screen_airdrop.receiver.pipeline.factory import get_pipeline_factory, registered_pipeline_kinds
+from screen_airdrop.receiver.pipeline.live import ScreenLiveRuntime
+from screen_airdrop.receiver.pipeline.replay import ReplayPipeline
+from screen_airdrop.receiver.runtime.screen_capture import ScreenCapture
+
+
+def test_registered_pipeline_kinds_include_live_and_replay():
+    assert registered_pipeline_kinds() == ("live", "replay")
+
+
+def test_get_pipeline_factory_returns_registered_factories():
+    assert callable(get_pipeline_factory("live"))
+    assert callable(get_pipeline_factory("replay"))
 
 
 def test_create_replay_pipeline():
@@ -35,9 +45,14 @@ def test_create_screen_live_runtime():
     config.get_grid_size.return_value = (160, 96)
     config.decode_workers = 4
     config.prep_process = 1
+    config.frame_queue_size = 48
+    config.result_queue_size = 96
     config.capture_fps = 30.0
     config.capture_dump_dir = None
     config.capture_dump_max_frames = 0
+    config.debug_dir = "/tmp/debug"
+    config.debug_interval = 2.0
+    config.debug_max_frames = 10
 
     source = MagicMock(spec=ScreenCapture)
     source.monitor_index = 1
@@ -50,6 +65,8 @@ def test_create_screen_live_runtime():
 
     assert isinstance(pipeline, ScreenLiveRuntime)
     assert pipeline.protocol == "layered"
+    assert pipeline._frame_queue_size == 48
+    assert pipeline._result_queue_size == 96
 
 
 def test_create_pipeline_with_forced_roi():
@@ -60,9 +77,14 @@ def test_create_pipeline_with_forced_roi():
     config.get_grid_size.return_value = (160, 96)
     config.decode_workers = 0
     config.prep_process = 0
+    config.frame_queue_size = 32
+    config.result_queue_size = 256
     config.capture_fps = 30.0
     config.capture_dump_dir = None
     config.capture_dump_max_frames = 0
+    config.debug_dir = None
+    config.debug_interval = 1.0
+    config.debug_max_frames = 30
 
     source = MagicMock(spec=ScreenCapture)
     source.monitor_index = 1
@@ -85,9 +107,14 @@ def test_create_pipeline_without_forced_roi():
     config.get_grid_size.return_value = (160, 96)
     config.decode_workers = 0
     config.prep_process = 0
+    config.frame_queue_size = 32
+    config.result_queue_size = 256
     config.capture_fps = 30.0
     config.capture_dump_dir = None
     config.capture_dump_max_frames = 0
+    config.debug_dir = None
+    config.debug_interval = 1.0
+    config.debug_max_frames = 30
 
     source = MagicMock(spec=ScreenCapture)
     source.monitor_index = 1

@@ -2,11 +2,11 @@
 
 import pytest
 
-from screen_airdrop.receiver.protocol_adapter_basic import BasicProtocolDecoder
-from screen_airdrop.receiver.protocol_adapter_compact import CompactProtocolDecoder
-from screen_airdrop.receiver.protocol_adapter_gray4 import Gray4ProtocolDecoder
-from screen_airdrop.receiver.protocol_adapter_layered import LayeredProtocolDecoder
-from screen_airdrop.receiver.protocol_decoder_factory import create_protocol_decoder
+from screen_airdrop.receiver.transport.basic.adapter import BasicProtocolDecoder
+from screen_airdrop.receiver.transport.compact.adapter import CompactProtocolDecoder
+from screen_airdrop.receiver.transport.decoder_factory import create_protocol_decoder
+from screen_airdrop.receiver.transport.gray4.adapter import Gray4ProtocolDecoder
+from screen_airdrop.receiver.transport.layered.adapter import LayeredProtocolDecoder
 
 
 def test_create_basic_decoder():

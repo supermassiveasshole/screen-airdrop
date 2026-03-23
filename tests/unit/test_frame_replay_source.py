@@ -1,4 +1,4 @@
-from screen_airdrop.receiver.frame_replay_source import FrameReplaySource
+from screen_airdrop.receiver.application.replay_source import FrameReplaySource
 
 
 def test_replay_source_prioritizes_sync_before_epoch_frames():

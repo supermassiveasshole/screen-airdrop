@@ -1,8 +1,8 @@
 """Tests for progress reporting system."""
 
-from screen_airdrop.receiver.runtime.console_reporter import ConsoleProgressReporter
-from screen_airdrop.receiver.runtime.progress_reporter import SilentProgressReporter
-from screen_airdrop.receiver.runtime.stats_formatter import (
+from screen_airdrop.receiver.reporting.console import ConsoleProgressReporter
+from screen_airdrop.receiver.reporting.reporter import SilentProgressReporter
+from screen_airdrop.receiver.reporting.formatters import (
     CompactStatsFormatter,
     ScreenLiveStatsFormatter,
 )

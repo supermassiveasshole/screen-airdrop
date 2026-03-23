@@ -19,15 +19,8 @@ import pytest
 
 from screen_airdrop.receiver.locator.basic import locate_frame_legacy
 from screen_airdrop.receiver.locator.frame_locator import FrameLocator
-from screen_airdrop.receiver.runtime.frame_preprocessor import (
-    clip_roi_to_frame,
-    compute_fingerprint,
-)
-from screen_airdrop.receiver.runtime.geometry_tracker import GeometryState, GeometryTracker
-from screen_airdrop.receiver.runtime.pipeline_runner import PipelineRunner
-from screen_airdrop.receiver.runtime.slot_manager import SlotManager
-from screen_airdrop.receiver.runtime.workers import _meta_snapshot
-from screen_airdrop.receiver.screen_live_runtime import (
+from screen_airdrop.receiver.locator.state_machine import GeometryState, GeometryTracker
+from screen_airdrop.receiver.pipeline.live import (
     FrameSlotDescriptor,
     ScreenLiveRuntime,
     ScreenLiveRuntimeStats,
@@ -35,6 +28,15 @@ from screen_airdrop.receiver.screen_live_runtime import (
     _process_still_alive,
     _put_queue_sentinel,
 )
+from screen_airdrop.receiver.pipeline.runner import PipelineRunner
+from screen_airdrop.receiver.reporting.report import Report
+from screen_airdrop.receiver.runtime.events import DecodeCompletion
+from screen_airdrop.receiver.runtime.frame_preprocessor import (
+    clip_roi_to_frame,
+    compute_fingerprint,
+)
+from screen_airdrop.receiver.runtime.slot_manager import SlotManager
+from screen_airdrop.receiver.runtime.workers import _meta_snapshot
 
 
 def test_slot_registry_rejects_stale_descriptor_after_reuse() -> None:
@@ -171,6 +173,26 @@ def test_runtime_rejects_prep_process_gt_one() -> None:
         )
 
 
+def test_runtime_rejects_non_positive_queue_sizes() -> None:
+    with pytest.raises(ValueError, match="frame_queue_size must be positive"):
+        ScreenLiveRuntime(
+            capture=SimpleNamespace(
+                monitor_index=1, window_title=None, region=None, active_region=None
+            ),
+            assembler=SimpleNamespace(),
+            frame_queue_size=0,
+        )
+
+    with pytest.raises(ValueError, match="result_queue_size must be positive"):
+        ScreenLiveRuntime(
+            capture=SimpleNamespace(
+                monitor_index=1, window_title=None, region=None, active_region=None
+            ),
+            assembler=SimpleNamespace(),
+            result_queue_size=0,
+        )
+
+
 def test_runtime_uses_per_worker_decode_assignment_queues(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -191,15 +213,15 @@ def test_runtime_uses_per_worker_decode_assignment_queues(
             return None
 
     monkeypatch.setattr(
-        "screen_airdrop.receiver.screen_live_runtime.get_monitor_region",
+        "screen_airdrop.receiver.pipeline.live.get_monitor_region",
         lambda monitor_index: (0, 0, 100, 100),
     )
     monkeypatch.setattr(
-        "screen_airdrop.receiver.screen_live_runtime.resolve_window_region",
+        "screen_airdrop.receiver.pipeline.live.resolve_window_region",
         lambda window_title, explicit_region, monitor_region: (0, 0, 100, 100),
     )
     monkeypatch.setattr(
-        "screen_airdrop.receiver.screen_live_runtime.shared_memory.SharedMemory",
+        "screen_airdrop.receiver.pipeline.live.shared_memory.SharedMemory",
         _FakeShm,
     )
 
@@ -247,6 +269,68 @@ def test_meta_snapshot_preserves_layered_body_profile_fields() -> None:
     snap = _meta_snapshot(meta)
     assert getattr(snap, "body_profile_id") == 3
     assert getattr(snap, "body_profile_name") == "dense"
+
+
+def test_meta_snapshot_preserves_detection_bbox() -> None:
+    meta = SimpleNamespace(det_bbox=(1, 2, 3, 4))
+    snap = _meta_snapshot(meta)
+    assert getattr(snap, "det_bbox") == (1, 2, 3, 4)
+
+
+def test_runtime_frame_callback_dumps_debug_snapshot_and_calls_user_callback() -> None:
+    runtime = object.__new__(ScreenLiveRuntime)
+    runtime_any = cast(Any, runtime)
+    dump_calls: list[dict[str, Any]] = []
+    user_calls: list[DecodeCompletion] = []
+    runtime_any._debug_snapshot_manager = SimpleNamespace(
+        maybe_dump=lambda *, now, threshold, dump_kwargs: dump_calls.append(
+            {"now": now, "threshold": threshold, "dump_kwargs": dump_kwargs}
+        )
+    )
+    runtime_any._user_on_frame_callback = lambda completion: user_calls.append(completion)
+    runtime_any._slot_views = [np.zeros((8, 8, 4), dtype=np.uint8)]
+    runtime_any._capture = SimpleNamespace(active_region=(10, 20, 30, 40))
+    runtime_any._assembler = SimpleNamespace(
+        control_items={"layout": b"x"},
+        session_info={"session_id": 7},
+        layout_info={"module_grid": "160x96"},
+        generation_info={"generation_id": 2},
+        generations={2: {"generation_id": 2}},
+    )
+    runtime_any._geometry_tracker = SimpleNamespace(get_current_roi=lambda: (1, 2, 3, 4))
+    runtime_any._protocol = "layered"
+    runtime_any._grid_w = 160
+    runtime_any._grid_h = 96
+    runtime_any._manual_mode = False
+    runtime_any._initial_search_roi = (5, 6, 7, 8)
+
+    completion = DecodeCompletion(
+        descriptor=FrameSlotDescriptor(
+            slot_id=0,
+            generation=1,
+            capture_index=9,
+            ts=1.0,
+            width=8,
+            height=8,
+            fingerprint=b"x",
+        ),
+        worker_id=0,
+        success=False,
+        error="decode failed",
+        failure_class="payload",
+        context={"attempt": 1},
+        meta=SimpleNamespace(det_bbox=(11, 12, 13, 14)),
+        chunk_id=-1,
+        payload=b"",
+    )
+
+    ScreenLiveRuntime._handle_frame_completion(runtime, completion)
+
+    assert len(dump_calls) == 1
+    assert dump_calls[0]["threshold"] == 128
+    assert dump_calls[0]["dump_kwargs"]["det_bbox_local"] == (11, 12, 13, 14)
+    assert dump_calls[0]["dump_kwargs"]["decode_error"] == "decode failed"
+    assert user_calls == [completion]
 
 
 class _SentinelQueue:
@@ -354,6 +438,45 @@ def test_pipeline_runner_idle_timer_requires_new_progress() -> None:
     runner._refresh_last_good_time({"decode_ok": 1, "assembled": 1}, now=25.0)
     assert runner.last_good_time == 25.0
     assert initial_time != runner.last_good_time
+
+
+def test_pipeline_runner_cleans_up_if_start_is_interrupted() -> None:
+    calls: list[str] = []
+
+    class _Pipeline:
+        def start(self) -> None:
+            calls.append("start")
+            raise KeyboardInterrupt
+
+        def stop(self) -> None:
+            calls.append("stop")
+
+        def join(self) -> None:
+            calls.append("join")
+
+        def snapshot(self) -> dict[str, Any]:
+            calls.append("snapshot")
+            return {"captured": 0}
+
+        def get_report_collector(self):
+            return None
+
+    runner = PipelineRunner(
+        pipeline=cast(Any, _Pipeline()),
+        assembler=SimpleNamespace(),
+        max_seconds=0,
+        max_idle_seconds=30,
+        stats_interval=1.0,
+    )
+
+    exit_code, report = runner.run()
+
+    assert exit_code == 1
+    assert isinstance(report, Report)
+    assert report.get("status") == "aborted"
+    assert calls[0] == "start"
+    assert calls.count("snapshot") >= 1
+    assert calls[-2:] == ["stop", "join"]
 
 
 def test_shutdown_processes_kills_stubborn_child() -> None:

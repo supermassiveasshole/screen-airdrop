@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from screen_airdrop.sender import modern
+from screen_airdrop.sender.cli import modern
 
 
 def test_modern_sender_uses_black_outer_padding_for_gray4(monkeypatch):
@@ -22,4 +22,3 @@ def test_modern_sender_uses_black_outer_padding_for_gray4(monkeypatch):
 
     assert rc == 0
     assert captured["outer_padding_color"] == "black"
-

@@ -5,13 +5,14 @@ collectors to build a complete report. It replaces the old Report + ReportBuilde
 architecture with a cleaner, more modular design.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, cast
 
-from screen_airdrop.receiver.reporting.assembler_collector import AssemblerCollector
-from screen_airdrop.receiver.reporting.collector import Collector
-from screen_airdrop.receiver.reporting.protocol_collector import ProtocolCollector
+from screen_airdrop.receiver.reporting.interfaces import (
+    CollectorProtocol,
+    FinalizingStatsCollectorProtocol,
+    ProtocolCollectorProtocol,
+)
 from screen_airdrop.receiver.reporting.report import Report
-from screen_airdrop.receiver.reporting.stats_collector import StatsCollector
 
 
 class ReportCollector:
@@ -30,16 +31,16 @@ class ReportCollector:
     def __init__(
         self,
         *,
-        stats_collector: StatsCollector,
-        protocol_collector: Optional[ProtocolCollector] = None,
-        assembler_collector: AssemblerCollector,
-        additional_collectors: Optional[List[Collector]] = None,
+        stats_collector: CollectorProtocol,
+        protocol_collector: Optional[ProtocolCollectorProtocol] = None,
+        assembler_collector: CollectorProtocol,
+        additional_collectors: Optional[List[CollectorProtocol]] = None,
     ):
         """Initialize report collector.
 
         Args:
-            stats_collector: Statistics collector (wraps Stats object)
-            protocol_collector: Protocol-specific collector (optional, None for basic/compact)
+            stats_collector: Statistics collector
+            protocol_collector: Protocol-specific event collector (optional)
             assembler_collector: Assembler state collector
             additional_collectors: Additional collectors (optional)
         """
@@ -111,10 +112,11 @@ class ReportCollector:
 
         # Collect from stats collector
         # Use collect_finalized for TransferStats which needs parameters
-        if hasattr(self._stats_collector, 'collect_finalized'):
-            stats_data = self._stats_collector.collect_finalized(
+        if hasattr(self._stats_collector, "collect_finalized"):
+            finalized_collector = cast(FinalizingStatsCollectorProtocol, self._stats_collector)
+            stats_data = finalized_collector.collect_finalized(
                 output_size_bytes=output_size_bytes,
-                ts=ts
+                ts=ts,
             )
         else:
             stats_data = self._stats_collector.collect()

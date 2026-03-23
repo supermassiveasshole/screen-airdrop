@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import numpy as np
 
-from screen_airdrop.common.protocol_basic import FrameHeaderBasic
-from screen_airdrop.receiver.decoder_gray4 import decode_frame_gray4
-from screen_airdrop.sender.encoder_gray4 import (
+from screen_airdrop.common.transport.protocol_basic import FrameHeaderBasic
+from screen_airdrop.receiver.transport.gray4.decoder import decode_frame_gray4
+from screen_airdrop.sender.transport.gray4.encoder import (
     build_symbol_modules_gray4,
     encode_frame_gray4,
     frame_capacity_bytes_gray4,
@@ -157,7 +157,7 @@ def test_gray4_encoder_decoder_roundtrip_default_grid_large_payload():
 
 def test_gray4_capacity_comparison():
     """Test that gray4 has higher capacity than basic at same grid size."""
-    from screen_airdrop.sender.encoder_basic import frame_capacity_bytes_basic
+    from screen_airdrop.sender.transport.basic.encoder import frame_capacity_bytes_basic
     
     grid_w = 160
     grid_h = 96

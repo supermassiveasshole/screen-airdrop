@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from screen_airdrop.common.protocol_basic import FRAME_DATA, FRAME_END, FRAME_SYNC, FrameHeaderBasic
-from screen_airdrop.sender.protocol_adapter_gray4 import Gray4ProtocolEncoder
+from screen_airdrop.common.transport.protocol_basic import FRAME_DATA, FRAME_END, FRAME_SYNC, FrameHeaderBasic
+from screen_airdrop.sender.transport.gray4.adapter import Gray4ProtocolEncoder
 
 
 def _make_header(*, frame_type: int, epoch_id: int, chunk_id: int, frame_id: int = 0) -> FrameHeaderBasic:

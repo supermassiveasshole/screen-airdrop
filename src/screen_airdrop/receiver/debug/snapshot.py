@@ -8,7 +8,7 @@ import numpy as np
 
 from screen_airdrop.receiver.debug.drawing import FrameDrawer
 from screen_airdrop.receiver.debug.metadata import DebugMetadataBuilder
-from screen_airdrop.receiver.detector_basic import detect_symbol_bbox
+from screen_airdrop.receiver.transport.basic.detector import detect_symbol_bbox
 
 
 def _roi_local_to_abs(

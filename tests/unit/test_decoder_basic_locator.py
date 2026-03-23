@@ -1,8 +1,8 @@
 import pytest
 
-from screen_airdrop.common.protocol_basic import FRAME_DATA, FrameHeaderBasic
-from screen_airdrop.receiver.decoder_basic import decode_frame_basic
-from screen_airdrop.sender.encoder_basic import encode_frame_basic
+from screen_airdrop.common.transport.protocol_basic import FRAME_DATA, FrameHeaderBasic
+from screen_airdrop.receiver.transport.basic.decoder import decode_frame_basic
+from screen_airdrop.sender.transport.basic.encoder import encode_frame_basic
 
 
 def _build_frame(payload: bytes = b"locator-engine"):

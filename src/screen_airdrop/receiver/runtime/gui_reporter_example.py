@@ -6,7 +6,7 @@ with a GUI implementation (e.g., using tkinter or PyQt).
 
 from typing import Any, Dict, Optional
 
-from screen_airdrop.receiver.runtime.progress_reporter import ProgressReporter
+from screen_airdrop.receiver.reporting.reporter import ProgressReporter
 
 
 class GUIProgressReporter(ProgressReporter):

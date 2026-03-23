@@ -64,7 +64,7 @@ The current implementation uses repetition coding:
 - `H -> rep=4`
 
 Source:
-- [protocol_basic.py](/Users/waldron/Code/screen-airdrop/src/screen_airdrop/common/protocol_basic.py)
+- [protocol_basic.py](/Users/waldron/Code/screen-airdrop/src/screen_airdrop/common/transport/protocol_basic.py)
 
 This is the single biggest reason the current protocol family loses net payload efficiency.
 
@@ -82,8 +82,8 @@ Current defaults:
 - `compact`: `quiet=4`, `finder=7`, `guard=1`
 
 Sources:
-- [layout_basic.py](/Users/waldron/Code/screen-airdrop/src/screen_airdrop/common/layout_basic.py)
-- [layout_compact.py](/Users/waldron/Code/screen-airdrop/src/screen_airdrop/common/layout_compact.py)
+- [layout_basic.py](/Users/waldron/Code/screen-airdrop/src/screen_airdrop/common/transport/layout_basic.py)
+- [layout_compact.py](/Users/waldron/Code/screen-airdrop/src/screen_airdrop/common/transport/layout_compact.py)
 
 ## Capacity Table
 

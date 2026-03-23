@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-from screen_airdrop.receiver.runtime.geometry_tracker import GeometryState
+from screen_airdrop.receiver.locator.state_machine import GeometryState
 
 
 @dataclass(frozen=True)
@@ -90,6 +90,8 @@ class DecodeCompletion:
     frame_type: int = -1
     chunk_id: int = -1
     payload: bytes = b""
+    control_kind: str = ""
+    transmission_unit: Any = None
     decode_mode: str = ""
     decode_quality: float = 0.0
     decode_attach_ms: float = 0.0

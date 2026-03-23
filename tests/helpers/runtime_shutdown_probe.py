@@ -8,7 +8,7 @@ from multiprocessing import resource_tracker, shared_memory
 from threading import Lock
 from typing import Any, Dict, List, cast
 
-from screen_airdrop.receiver.screen_live_runtime import ScreenLiveRuntime
+from screen_airdrop.receiver.pipeline.live import ScreenLiveRuntime
 
 
 def _child_block_on_queue(q: Any) -> None:

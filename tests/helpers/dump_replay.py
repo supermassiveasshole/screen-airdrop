@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Tuple
 
 from screen_airdrop.receiver.cli import main as receiver_main
-from screen_airdrop.sender.controller import build_encoded_frames
+from screen_airdrop.sender.application.controller import build_encoded_frames
 
 
 def dump_and_replay(

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from screen_airdrop.common.protocol_gray4 import (
+from screen_airdrop.common.transport.protocol_gray4 import (
     decode_gray4_symbols,
     decode_repetition_symbols,
     ecc_repetition_symbols,
@@ -104,7 +104,7 @@ def test_gray4_full_pipeline_with_ecc():
 
 def test_gray4_all_ecc_levels():
     """Test gray4 with all ECC levels (L, M, Q, H)."""
-    from screen_airdrop.common.protocol_basic import ECC_TO_REP
+    from screen_airdrop.common.transport.protocol_basic import ECC_TO_REP
     
     original = bytes([0x00, 0x55, 0xAA, 0xFF])
     

@@ -8,8 +8,9 @@ import threading
 import time
 from typing import Any, List, Optional
 
-from screen_airdrop.receiver.assembler import ChunkAssembler
-from screen_airdrop.receiver.reporting import ReportCollector
+from screen_airdrop.receiver.information import ChunkAssembler
+from screen_airdrop.receiver.locator.state_machine import GeometryTracker
+from screen_airdrop.receiver.reporting.interfaces import ReportCollectorProtocol
 from screen_airdrop.receiver.runtime.events import (
     DecodeAssignment,
     DecodeCompletion,
@@ -18,7 +19,6 @@ from screen_airdrop.receiver.runtime.events import (
     FilledSlotEvent,
     PreparedSlotEvent,
 )
-from screen_airdrop.receiver.runtime.geometry_tracker import GeometryTracker
 from screen_airdrop.receiver.runtime.prep_strategy import PrepStrategy
 from screen_airdrop.receiver.runtime.slot_manager import SlotManager
 from screen_airdrop.receiver.runtime.stats import ScreenLiveRuntimeStats
@@ -53,6 +53,15 @@ def _queue_get_with_stop(queue_obj: Any, stop_event: threading.Event) -> object:
         return None
 
 
+def _queue_put_nowait(queue_obj: Any, item: object) -> None:
+    """Enqueue without blocking when the queue implementation allows it."""
+    put_nowait = getattr(queue_obj, "put_nowait", None)
+    if callable(put_nowait):
+        put_nowait(item)
+        return
+    queue_obj.put(item, block=False)
+
+
 class RuntimeCoordinator:
     """Pure event router: receives events from workers, dispatches to handlers."""
 
@@ -63,7 +72,7 @@ class RuntimeCoordinator:
         geometry_tracker: GeometryTracker,
         stats: ScreenLiveRuntimeStats,
         assembler: ChunkAssembler,
-        report_collector: ReportCollector,
+        report_collector: ReportCollectorProtocol,
         prep_strategy: PrepStrategy,
         grab_slot_queue: Any,
         grab_event_queue: Any,
@@ -84,7 +93,7 @@ class RuntimeCoordinator:
             geometry_tracker: Geometry state tracker
             stats: Runtime statistics
             assembler: Chunk assembler
-            report_collector: ReportCollector for new architecture
+            report_collector: report collector for new architecture
             prep_strategy: Prep processing strategy (async or process)
             grab_slot_queue: Queue for slot assignments to grab worker
             grab_event_queue: Queue for filled slot events from grab worker
@@ -440,7 +449,7 @@ class RuntimeCoordinator:
         )
 
         try:
-            self._decode_assignment_queues[worker_id].put(assignment)
+            _queue_put_nowait(self._decode_assignment_queues[worker_id], assignment)
             with self._stats._lock:
                 self._stats.accepted_for_decode_frames += 1
                 self._stats.decode_queue_depth += 1
@@ -566,19 +575,36 @@ class RuntimeCoordinator:
 
         # Assemble chunk
         if completion.frame_type == 1:  # FRAME_DATA
-            is_new = self._assembler.add(completion.chunk_id, completion.payload)
+            if completion.control_kind:
+                try:
+                    self._assembler.add_control(completion.control_kind, completion.payload)
+                except Exception:
+                    pass
+            else:
+                transmission_unit = getattr(completion, "transmission_unit", None)
+                is_new = (
+                    self._assembler.add_unit(transmission_unit)
+                    if transmission_unit is not None
+                    else self._assembler.add(completion.chunk_id, completion.payload)
+                )
 
-            with self._stats._lock:
-                if is_new:
-                    self._stats.decoded_new_chunks += 1
-                    self._stats.assembled += 1
-                    self._stats.assembled_bytes += len(completion.payload)
-                    if self._stats.first_new_chunk_ts is None:
-                        self._stats.first_new_chunk_ts = completion.descriptor.ts
-                else:
-                    self._stats.decoded_duplicate_chunks += 1
+                with self._stats._lock:
+                    if is_new:
+                        self._stats.decoded_new_chunks += 1
+                        self._stats.assembled += 1
+                        self._stats.assembled_bytes += len(completion.payload)
+                        if self._stats.first_new_chunk_ts is None:
+                            self._stats.first_new_chunk_ts = completion.descriptor.ts
+                    else:
+                        self._stats.decoded_duplicate_chunks += 1
 
         # Complete decode and release slot
+        if self._on_frame_callback is not None:
+            try:
+                self._on_frame_callback(completion)
+            except Exception:
+                pass
+
         self._slot_manager.complete_decode(completion.descriptor, completion.worker_id)
         _debug_log(
             "coord_release_after_decode_success",
@@ -589,10 +615,6 @@ class RuntimeCoordinator:
             chunk_id=completion.chunk_id,
         )
         self._dispatch_slot_to_grab()
-
-        # Callback
-        if self._on_frame_callback is not None:
-            self._on_frame_callback(completion)
 
     def _handle_decode_failure(self, completion: Any) -> None:
         """Handle decode failure."""
@@ -640,6 +662,12 @@ class RuntimeCoordinator:
                 self._stats.lock_locked_to_acquire += 1
 
         # Complete decode and release slot
+        if self._on_frame_callback is not None:
+            try:
+                self._on_frame_callback(completion)
+            except Exception:
+                pass
+
         self._slot_manager.complete_decode(completion.descriptor, completion.worker_id)
         _debug_log(
             "coord_release_after_decode_failure",

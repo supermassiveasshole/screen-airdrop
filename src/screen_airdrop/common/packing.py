@@ -12,7 +12,7 @@ from typing import Dict, List, Tuple
 
 from .errors import E1001, E1002, E1003, ScreenAirdropError
 from .manifest import Manifest
-from .protocol_basic import PROTOCOL_VERSION
+from .transport.protocol_basic import PROTOCOL_VERSION
 
 
 def ensure_input_exists(path: str) -> None:

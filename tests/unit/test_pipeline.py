@@ -20,10 +20,10 @@ from screen_airdrop.common.control_plane import (
     encode_layout_bootstrap,
     encode_session_bootstrap,
 )
-from screen_airdrop.common.protocol_basic import FRAME_DATA, FrameHeaderBasic
-from screen_airdrop.common.protocol_interface import DecodedFrame
-from screen_airdrop.receiver.assembler import ChunkAssembler
-from screen_airdrop.receiver.decoder_basic import DecodeMetaBasic
+from screen_airdrop.common.transport.protocol_basic import FRAME_DATA, FrameHeaderBasic
+from screen_airdrop.common.transport.protocol_interface import DecodedFrame
+from screen_airdrop.receiver.information.assembler import ChunkAssembler
+from screen_airdrop.receiver.transport.basic.decoder import DecodeMetaBasic
 from screen_airdrop.receiver.pipeline import (
     AssemblerThread,
     DecodeResult,
@@ -674,7 +674,7 @@ class TestDecodeWorker:
             return DecodedFrame(frame_header=header, payload=b"ok", meta=_make_meta())
 
         with patch(
-            "screen_airdrop.receiver.protocol_adapter_basic.BasicProtocolDecoder.decode_frame",
+            "screen_airdrop.receiver.transport.basic.adapter.BasicProtocolDecoder.decode_frame",
             side_effect=_fake_decode_frame,
         ):
             worker = DecodeWorker(
@@ -727,7 +727,7 @@ class TestDecodeWorker:
             )
 
         with patch(
-            "screen_airdrop.receiver.protocol_adapter_basic.BasicProtocolDecoder.decode_frame",
+            "screen_airdrop.receiver.transport.basic.adapter.BasicProtocolDecoder.decode_frame",
             side_effect=_fake_decode_frame,
         ):
             worker = DecodeWorker(
@@ -758,7 +758,7 @@ class TestDecodeWorker:
             raise ValueError("decode failed")
 
         with patch(
-            "screen_airdrop.receiver.protocol_adapter_basic.BasicProtocolDecoder.decode_frame",
+            "screen_airdrop.receiver.transport.basic.adapter.BasicProtocolDecoder.decode_frame",
             side_effect=_fake_decode_frame,
         ):
             worker = DecodeWorker(
@@ -803,7 +803,7 @@ class TestDecodeWorker:
             )
 
         with patch(
-            "screen_airdrop.receiver.protocol_adapter_basic.BasicProtocolDecoder.decode_frame",
+            "screen_airdrop.receiver.transport.basic.adapter.BasicProtocolDecoder.decode_frame",
             side_effect=_fake_decode_frame,
         ):
             worker = DecodeWorker(
@@ -856,7 +856,7 @@ class TestDecodeWorker:
             raise ValueError("decode failed")
 
         with patch(
-            "screen_airdrop.receiver.protocol_adapter_basic.BasicProtocolDecoder.decode_frame",
+            "screen_airdrop.receiver.transport.basic.adapter.BasicProtocolDecoder.decode_frame",
             side_effect=_fake_decode_frame,
         ):
             worker = DecodeWorker(
@@ -918,10 +918,10 @@ class TestDecodeWorker:
             return _make_layered_result(2, 2, geometry_reused=True)
 
         with patch(
-            "screen_airdrop.receiver.protocol_adapter_layered.LayeredProtocolDecoder.decode_frame",
+            "screen_airdrop.receiver.transport.layered.adapter.LayeredProtocolDecoder.decode_frame",
             side_effect=_fake_decode_frame,
         ), patch(
-            "screen_airdrop.receiver.protocol_adapter_layered.LayeredProtocolDecoder.decode_frame_with_geometry",
+            "screen_airdrop.receiver.transport.layered.adapter.LayeredProtocolDecoder.decode_frame_with_geometry",
             side_effect=_fake_decode_frame_with_geometry,
         ):
             worker = DecodeWorker(
@@ -984,10 +984,10 @@ class TestDecodeWorker:
             raise ValueError("bootstrap rs decode failed")
 
         with patch(
-            "screen_airdrop.receiver.protocol_adapter_layered.LayeredProtocolDecoder.decode_frame",
+            "screen_airdrop.receiver.transport.layered.adapter.LayeredProtocolDecoder.decode_frame",
             side_effect=_fake_decode_frame,
         ), patch(
-            "screen_airdrop.receiver.protocol_adapter_layered.LayeredProtocolDecoder.decode_frame_with_geometry",
+            "screen_airdrop.receiver.transport.layered.adapter.LayeredProtocolDecoder.decode_frame_with_geometry",
             side_effect=_fake_decode_frame_with_geometry,
         ):
             worker = DecodeWorker(

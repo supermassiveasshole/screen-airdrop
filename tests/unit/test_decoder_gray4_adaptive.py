@@ -1,11 +1,11 @@
 import numpy as np
 
-from screen_airdrop.receiver.decoder_gray4 import (
+from screen_airdrop.receiver.transport.gray4.decoder import (
     _base_sample_phase_candidates,
     _fit_gray4_centers,
     _quantize_gray4_adaptive,
 )
-from screen_airdrop.sender.encoder_gray4 import build_layout_gray4
+from screen_airdrop.sender.transport.gray4.encoder import build_layout_gray4
 
 
 def test_fit_gray4_centers_tracks_shifted_levels():

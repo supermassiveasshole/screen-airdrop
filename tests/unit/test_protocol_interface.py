@@ -5,15 +5,15 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
-from screen_airdrop.common.protocol_basic import FRAME_DATA, FrameHeaderBasic
-from screen_airdrop.common.protocol_interface import DecodedFrame
-from screen_airdrop.receiver.decoder_basic import DecodeMetaBasic
-from screen_airdrop.receiver.decoder_compact import decode_frame_compact
-from screen_airdrop.receiver.detector_basic import _bbox_from_non_black
-from screen_airdrop.receiver.protocol_adapter_basic import BasicProtocolDecoder
-from screen_airdrop.receiver.protocol_adapter_compact import CompactProtocolDecoder
-from screen_airdrop.sender.protocol_adapter_basic import BasicProtocolEncoder
-from screen_airdrop.sender.protocol_adapter_compact import CompactProtocolEncoder
+from screen_airdrop.common.transport.protocol_basic import FRAME_DATA, FrameHeaderBasic
+from screen_airdrop.common.transport.protocol_interface import DecodedFrame
+from screen_airdrop.receiver.transport.basic.adapter import BasicProtocolDecoder
+from screen_airdrop.receiver.transport.basic.decoder import DecodeMetaBasic
+from screen_airdrop.receiver.transport.basic.detector import _bbox_from_non_black
+from screen_airdrop.receiver.transport.compact.adapter import CompactProtocolDecoder
+from screen_airdrop.receiver.transport.compact.decoder import decode_frame_compact
+from screen_airdrop.sender.transport.basic.adapter import BasicProtocolEncoder
+from screen_airdrop.sender.transport.compact.adapter import CompactProtocolEncoder
 
 
 def test_basic_encoder_adapter():
@@ -70,7 +70,7 @@ def test_basic_encoder_passes_typed_header_through():
     fake_image = np.zeros((32, 32, 3), dtype=np.uint8)
 
     with patch(
-        "screen_airdrop.sender.protocol_adapter_basic.encode_frame_basic",
+        "screen_airdrop.sender.transport.basic.adapter.encode_frame_basic",
         return_value=fake_image,
     ) as mocked_encode:
         image = encoder.encode_frame(header, payload, 1920, 1080)
@@ -114,7 +114,7 @@ def test_basic_decoder_preserves_typed_result():
     )
 
     with patch(
-        "screen_airdrop.receiver.protocol_adapter_basic.decode_frame_basic",
+        "screen_airdrop.receiver.transport.basic.adapter.decode_frame_basic",
         return_value=(header, b"payload", meta),
     ):
         decoded = decoder.decode_frame(np.zeros((32, 32, 3), dtype=np.uint8))
@@ -123,6 +123,11 @@ def test_basic_decoder_preserves_typed_result():
     assert decoded.frame_header is header
     assert decoded.payload == b"payload"
     assert decoded.meta is meta
+    assert decoded.control_kind is None
+    assert decoded.transmission_unit is not None
+    assert decoded.transmission_unit.source_index == 4
+    assert decoded.transmission_unit.generation_id == 0
+    assert decoded.transmission_unit.payload == b"payload"
 
 
 def test_compact_encoder_decoder_roundtrip():
@@ -147,6 +152,9 @@ def test_compact_encoder_decoder_roundtrip():
     assert decoded.frame_header.chunk_id == header.chunk_id
     assert decoded.payload == payload
     assert decoded.meta.locator_engine == "legacy"  # Compact uses legacy locator for 7x7 finders
+    assert decoded.control_kind is None
+    assert decoded.transmission_unit is not None
+    assert decoded.transmission_unit.source_index == int(header.chunk_id)
 
 
 @pytest.mark.parametrize("ecc_level", ["L", "M", "Q", "H"])

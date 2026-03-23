@@ -1,6 +1,6 @@
-from screen_airdrop.common.protocol_basic import FRAME_DATA, FrameHeaderBasic
-from screen_airdrop.receiver.detector_basic import detect_symbol_bbox
-from screen_airdrop.sender.encoder_basic import encode_frame_basic
+from screen_airdrop.common.transport.protocol_basic import FRAME_DATA, FrameHeaderBasic
+from screen_airdrop.receiver.transport.basic.detector import detect_symbol_bbox
+from screen_airdrop.sender.transport.basic.encoder import encode_frame_basic
 
 
 def test_detect_bbox_from_full_frame():

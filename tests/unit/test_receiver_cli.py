@@ -3,7 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any, cast
 
-from screen_airdrop.receiver.capture_mss import ScreenCapture
+from screen_airdrop.receiver.runtime.screen_capture import ScreenCapture
 from screen_airdrop.receiver.cli import _build_source, _select_capture_region, build_parser
 
 

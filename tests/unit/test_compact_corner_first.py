@@ -2,9 +2,9 @@
 
 import numpy as np
 
-from screen_airdrop.common.protocol_basic import FRAME_DATA, FrameHeaderBasic
-from screen_airdrop.receiver.protocol_adapter_compact import CompactProtocolDecoder
-from screen_airdrop.sender.protocol_adapter_compact import CompactProtocolEncoder
+from screen_airdrop.common.transport.protocol_basic import FRAME_DATA, FrameHeaderBasic
+from screen_airdrop.receiver.transport.compact.adapter import CompactProtocolDecoder
+from screen_airdrop.sender.transport.compact.adapter import CompactProtocolEncoder
 
 
 def test_compact_corner_first_full_frame():

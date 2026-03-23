@@ -31,8 +31,8 @@ full = [
 ]
 
 [project.scripts]
-screen-airdrop-sender = "screen_airdrop.sender.modern:main"
-screen-airdrop-sender-legacy = "screen_airdrop.sender.legacy:main"
+screen-airdrop-sender = "screen_airdrop.sender.cli.modern:main"
+screen-airdrop-sender-legacy = "screen_airdrop.sender.cli.legacy:main"
 screen-airdrop-receiver = "screen_airdrop.receiver.cli:main"
 
 [dependency-groups]

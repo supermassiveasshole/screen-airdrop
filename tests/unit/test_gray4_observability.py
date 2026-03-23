@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from screen_airdrop.receiver.cli import _classify_gray4_decode_failure
 from screen_airdrop.receiver.runtime.stats import ScreenLiveRuntimeStats
-from screen_airdrop.receiver.protocol_observability import LayeredReportAdapter
+from screen_airdrop.receiver.transport.layered.observability import LayeredReportAdapter
 
 
 def test_classify_gray4_decode_failure_variants() -> None:
