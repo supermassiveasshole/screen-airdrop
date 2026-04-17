@@ -1883,47 +1883,39 @@ sender generation plan
 1. 功能已经不是“未验证代码”
 2. 但它仍然属于受控验证下的正式实验能力，而非默认生产开关
 
-## 15. 现在适合怎么拿给同事看
+## 15. 当前接入边界
 
-如果目标是先给同事评估、争取接入讨论，而不是立刻承诺最终调度层方案，建议这样表述。
+当前版本适合用于技术评估、受控环境验证以及 sender/receiver contract 对齐，但不应被视为最终 sender-side 调度策略完成版。
 
-### 15.1 可以明确说的内容
+### 15.1 当前已经稳定成形的部分
 
-1. 我们已经不是简单 QR code 方案
-2. 系统已经有完整 sender/receiver pipeline
-3. 已经支持多种 transport family，而不是单一编码方式
-4. 已经引入 generation 语义
-5. 已经有可运行的 GF(256) 擦除恢复基线
-6. 已经有 replay / simulated_live / benchmark / reporting 工具链
+1. 系统已经具备完整 sender/receiver pipeline
+2. transport family 已扩展到 `basic / compact / gray4 / layered`
+3. information layer 已引入 generation 语义
+4. receiver 侧已具备 GF(256) 擦除恢复基线
+5. 已有 replay / simulated_live / benchmark / reporting 工具链
 
-### 15.2 需要保守表述的内容
+### 15.2 当前仍然处于未完成状态的部分
 
-1. OGRB 还没做完
-2. 公平性 tradeoff 还没落地
-3. 自适应调度还没落地
-4. coded path 现在不是默认行为
-5. 当前最成熟的展示路径仍是受控 replay / basic baseline
+1. OGRB sender-side lifecycle 尚未落地
+2. fairness 与 airtime tradeoff 尚未完成
+3. overlap-aware generation scheduling 尚未完成
+4. coded path 仍不是默认产品路径
+5. 当前 strongest proof 仍集中在 replay-heavy `basic` 路线
 
-### 15.3 推荐的接入方式
+### 15.3 当前更适合的接入范围
 
-如果对方想“先整合，再等你们把 OGRB 写完”，当前最合适的接入方式是：
+1. sender/receiver contract 对齐
+2. generation control 与 control plane 解释对齐
+3. replay-compatible 恢复验证
+4. 受控环境下的 runtime 集成验证
 
-1. **先按现有 sender/receiver contract 接 transport-compatible 版本**
-2. **把 generation control / session control 当成正式接口理解**
-3. **把 coded emission 当成 opt-in capability，而不是默认假设**
-4. **暂时不要依赖未来 OGRB 的 fairness / overlap 行为**
+### 15.4 当前不应预设稳定的行为
 
-换句话说，当前适合做的是：
-
-1. 技术预集成
-2. 回放评估
-3. controlled environment 验证
-4. 数据面/控制面接口对齐
-
-而不适合做的是：
-
-1. 直接把当前 sender 说成最终 rateless scheduler
-2. 把当前 coded baseline 当成最终默认策略
+1. generation 间的最终调度顺序
+2. fairness 和 coded budget 参数面
+3. overlap generation 的正式语义
+4. coded injection 的最终时机与分布
 
 ## 16. 接入附录：当前版本的稳定接口面
 
@@ -2581,12 +2573,6 @@ OGRB 一旦真正开始落地，就不能只看最终是否恢复成功，还需
 4. 假设未来 OGRB 只是在现有 sender 上加几个配置项
 
 这些接法的问题在于，它们会把当前已经清晰的 contract 和未来仍在演进的 policy 混在一起。
-
-### 18.5 建议给同事的操作性表述
-
-如果需要用一句更工程化的话告诉对方“你现在该怎么开始”，建议这样说：
-
-> 先不要把它当成最终 rateless sender 来接。先把它当成一个已经具备 generation-aware control/data contract 和 GF(256) erasure baseline 的视觉传输系统，优先对齐 frame dump、control plane、unit identity 和 replay 恢复闭环；等这些都稳定之后，再决定要不要把你们自己的 runtime 或调度层接上来。
 
 ## 19. 术语与字段附录
 

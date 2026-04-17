@@ -262,17 +262,3 @@ uv run python bench/summarize.py
 4. [Architecture Refactor Plan](./docs/architecture_refactor_plan.md)
 5. [Gray4 Layered Full ECC Design](./docs/gray4_layered_full_ecc_design.md)
 6. [Protocol Efficiency Report](./docs/protocol_efficiency_report.md)
-
-## 当前推荐表述
-
-如果需要向外部同事描述当前分支，推荐这样说：
-
-1. 这是一个已经具备 generation-aware sender/receiver pipeline 的视觉传输系统
-2. 当前已有 GF(256) 擦除恢复基线和 live runtime 高吞吐设计
-3. 当前还没有完成 sender-side OGRB lifecycle / fairness policy
-
-不推荐这样说：
-
-1. “现在已经是最终 OGRB”
-2. “现在的 coded path 就是最终 rateless policy”
-3. “layered 已经等于最终完整协议”
