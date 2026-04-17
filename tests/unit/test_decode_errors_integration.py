@@ -1,9 +1,6 @@
 """Integration test: Worker extracts Error attributes → Coordinator records to ReportCollector."""
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
-
-import pytest
 
 from screen_airdrop.receiver.decode_errors import (
     DecodeError,

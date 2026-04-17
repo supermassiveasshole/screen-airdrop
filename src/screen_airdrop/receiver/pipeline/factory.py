@@ -5,10 +5,12 @@ from __future__ import annotations
 from screen_airdrop.receiver.pipeline.interfaces import PipelineFactoryProtocol
 from screen_airdrop.receiver.runtime.live_factory import create_live_pipeline
 from screen_airdrop.receiver.runtime.replay_factory import create_replay_pipeline
+from screen_airdrop.receiver.runtime.simulated_live_factory import create_simulated_live_pipeline
 
 _PIPELINE_FACTORIES: dict[str, PipelineFactoryProtocol] = {
     "live": create_live_pipeline,
     "replay": create_replay_pipeline,
+    "simulated_live": create_simulated_live_pipeline,
 }
 
 

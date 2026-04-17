@@ -43,11 +43,13 @@ _PROGRESS_REPORTER_FACTORIES: dict[str, ProgressReporterFactory] = {
 _SOURCE_DEFAULT_FORMATTERS: dict[str, str] = {
     "screen": "screen",
     "replay": "compact",
+    "simulated_live": "compact",
 }
 
 _SOURCE_DEFAULT_REPORTERS: dict[str, str] = {
     "screen": "console",
     "replay": "console",
+    "simulated_live": "console",
 }
 
 

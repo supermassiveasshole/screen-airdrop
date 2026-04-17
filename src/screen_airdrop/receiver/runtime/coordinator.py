@@ -580,6 +580,10 @@ class RuntimeCoordinator:
                     self._assembler.add_control(completion.control_kind, completion.payload)
                 except Exception:
                     pass
+            elif bool(getattr(completion, "invalid_data_payload", False)):
+                self._assembler.note_invalid_coded_payload(
+                    str(getattr(completion, "invalid_data_reason", "") or "")
+                )
             else:
                 transmission_unit = getattr(completion, "transmission_unit", None)
                 is_new = (

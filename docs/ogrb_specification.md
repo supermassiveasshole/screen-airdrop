@@ -1,173 +1,177 @@
 # OGRB Protocol Specification
 
-Version: 3.0-draft  
-Status: Design draft with real-generation systematic-only phase active in code  
+Version: 3.1-draft
+Status: Design draft with real-generation systematic baseline active in code; sparse-XOR erasure baseline complete; GF(2^8) erasure baseline complete; OGRB scheduler policy remains future work
 Target system: Screen-Airdrop visual transmission pipeline
 
 ## 1. Introduction
 
-This document specifies the OGRB protocol family for Screen-Airdrop.
+This document specifies OGRB for Screen-Airdrop as a **sender-side scheduling protocol** over explicitly defined information-layer transmission units.
 
-OGRB is not a visual renderer. OGRB is not a frame format by itself. OGRB is a scheduling model that operates on explicitly defined transmission units and relies on a separate visual transport layer to carry them over a real screen-capture channel.
+OGRB is not a visual renderer. OGRB is not a frame format. OGRB is not a decoder algorithm. OGRB is the policy and state machine that determines **which semantic unit is transmitted next**, under a strict erasure-oriented channel model and a separate visual transport layer.
 
-The purpose of this rewrite is to make the protocol implementable without semantic ambiguity. In particular, it enforces:
+This rewrite preserves the semantic rigor of the current draft and replaces the remaining scheduler skeleton with implementation-grade protocol rules.
 
-1. strict separation between information semantics, scheduling, and visual transport
-2. explicit distinction between systematic symbols and coded equations
-3. an erasure-oriented channel model for real-world screen capture failure modes
-4. compatibility with existing Screen-Airdrop visual designs, especially layered rendering, compact control headers, and gray4 modulation
+Normative goals:
 
-This specification does not require erasure coding to be implemented immediately. It defines the architecture so that Phase 4 (erasure coding) and Phase 5 (OGRB scheduling) can be added without redesigning the visual layer again.
+1. preserve strict separation between information semantics, scheduling, and visual transport
+2. preserve strict distinction between `SYSTEMATIC` units and `CODED` units
+3. define a sender lifecycle that is implementable without feedback
+4. define replay, redundancy, fairness, and termination semantics without ambiguity
+5. support overlapping-generation scheduling without weakening identity rules
 
 Current implementation status:
 
-1. The codebase is in a real-generation systematic-only phase.
-2. Sender payload chunks are partitioned into non-overlapping systematic generations before transport encoding.
-3. Receiver transport adapters normalize a decoded data frame into exactly one systematic unit candidate, and generation control binds that unit to a real semantic generation.
-4. Current transport `epoch_id` remains broadcast-round metadata and is not the same thing as semantic `generation_id`.
-5. No coded units, equation identities, rank tracking, or OGRB policy are implemented yet.
+1. the codebase already uses real semantic `generation_id`
+2. sender payload chunks are partitioned into real generations before transport encoding
+3. receiver information-layer state already distinguishes systematic symbols from coded equations
+4. receiver sparse-XOR erasure recovery exists as the current completed baseline
+5. default sender/receiver behavior remains systematic-only unless coded emission is explicitly enabled
+6. sender-side coded emission is a formal opt-in capability
+7. the current coded baseline is the `GF256_SEED_V2` coding family; `GF256_SEED_V1` remains compatibility-only
+8. short generations with uniform symbol size already participate in the current GF(2^8) erasure baseline using their actual `generation_size`
+9. OGRB lifecycle/fairness/budget scheduling is not yet implemented
 
-## 2. System Overview
+## 2. Normative Language
+
+The key words **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and **MAY** are to be interpreted as described in RFC 2119.
+
+## 3. System Overview
 
 The system is defined as three strictly separated layers.
 
-### 2.1 Layer 1: Information Layer
+### 3.1 Information Layer
 
-This layer defines **what** is being transmitted.
+The information layer defines **what** is transmitted.
 
-Its output is a stream of `TransmissionUnit` objects. A `TransmissionUnit` is either:
+Its output is a stream of `TransmissionUnit` objects:
 
-1. `SYSTEMATIC`
-   A source symbol from a generation.
-2. `CODED`
-   A coded equation over source symbols of a generation.
+1. `SystematicUnit`
+2. `CodedUnit`
 
 This layer owns:
 
-1. generation semantics
-2. source symbol identity
-3. coded equation identity
-4. decoding semantics
+1. generation membership
+2. source-symbol identity
+3. coded-equation identity
+4. receiver decode state
+5. recovery semantics
 
-This layer does **not** define frame timing, visual layout, or modulation.
+This layer does **not** define frame timing, rendering, modulation, or airtime allocation.
 
-### 2.2 Layer 2: Scheduling Layer
+### 3.2 Scheduling Layer
 
-This layer defines **when** each `TransmissionUnit` is sent.
+The scheduling layer defines **when** each `TransmissionUnit` is transmitted.
 
-This is the OGRB layer. It decides:
+This is the OGRB layer. It owns:
 
-1. which generation is active
-2. how new and old generations are mixed
-3. when revisits occur
-4. how much redundancy is allocated
-5. whether overlapping generations are enabled
+1. generation lifecycle
+2. active-generation admission and eviction
+3. old/new airtime allocation
+4. systematic-prefix scheduling
+5. fresh coded injection
+6. duplicate replay policy
+7. overlap-aware generation revisit policy
 
-This layer operates on `TransmissionUnit` objects only. It must not redefine their meaning.
+The scheduling layer MUST operate on semantic units only. It MUST NOT redefine unit semantics.
 
-### 2.3 Layer 3: Visual Transport Layer
+### 3.3 Visual Transport Layer
 
-This layer defines **how** a `TransmissionUnit` is rendered to the screen and recovered from captured frames.
+The visual transport layer defines **how** one semantic unit is carried over the visual channel.
 
-This specification preserves the existing visual design directions:
+It owns:
 
-1. compact control header encoding
-2. layered header/payload separation
-3. gray4 visual modulation
-4. existing protocol adaptor abstraction
+1. frame layout
+2. modulation
+3. header/control carriage
+4. payload carriage
+5. integrity checks
+6. valid-frame vs erasure classification
 
-This layer is semantics-agnostic. It transports `TransmissionUnit` objects but does not define whether a payload is a source symbol or a coded equation.
+It does **not** own:
 
-### 2.4 Layer Relation
+1. coded-equation meaning
+2. generation completion
+3. sender lifecycle
+4. replay policy
 
-The relation between the layers is:
+### 3.4 Layer Relation
 
-1. Information layer defines the units.
-2. OGRB schedules those units.
-3. Visual transport carries those units.
+The normative relation is:
 
-Explicitly:
+1. information layer defines semantic units
+2. scheduling layer chooses unit transmission opportunities
+3. visual transport layer carries those opportunities as frames
 
-1. erasure coding is not a subset of OGRB
-2. OGRB depends on information units that are suitable for erasure recovery
-3. the visual layer is below both and must not invent protocol semantics
+Any implementation that silently merges these responsibilities is non-compliant.
 
-## 3. Channel Model & Robustness Assumptions
+## 4. Channel Model and Erasure Discipline
 
-Screen-Airdrop does not run on an ideal packet channel. It runs on a visual channel with asynchronous sampling and display composition.
+Screen-Airdrop operates over a visual channel, not a reliable packet channel.
 
 Typical path:
 
 ```text
-sender renderer -> local compositor -> remote desktop / video compression
--> receiver screen capture -> frame decode
+sender renderer -> compositor -> remote desktop / compression
+-> capture -> visual decode
 ```
-
-### 3.1 Real-World Failure Modes
 
 The channel may exhibit:
 
 1. tearing
-   The captured image contains a mixture of two rendered frames.
-2. frame skip / drop
-   A displayed frame is never captured or never successfully decoded.
+2. frame drop
 3. asynchronous capture
-   Capture occurs at arbitrary times relative to sender frame boundaries.
 4. decode failure
-   Header or payload cannot be decoded reliably.
+5. pattern-dependent realization failure
 
-### 3.2 Required Abstraction
+### 4.1 Fail-Closed Rule
 
-All channel failures must be mapped to the same abstract outcome:
+A captured frame MUST produce exactly one of the following outcomes:
 
-**ERASURE**
+1. one valid semantic payload result
+2. erasure
 
-That means:
-
-1. a valid frame yields exactly one valid `TransmissionUnit`
-2. an invalid frame yields no `TransmissionUnit`
-3. corrupted frames must never partially update decoder state
-
-### 3.3 Strong Receiver Rule
-
-A frame must either be fully accepted as a valid `TransmissionUnit` or completely discarded as an erasure. It must not partially influence system state.
+No third outcome is allowed.
 
 Consequences:
 
-1. corrupted headers must be discarded immediately
-2. invalid payloads must be discarded immediately
-3. partial payload reuse is forbidden
-4. invalid frames must not participate in deduplication
-5. invalid frames must not create generation state
+1. invalid headers MUST fail closed
+2. invalid payloads MUST fail closed
+3. invalid frames MUST NOT partially update semantic state
+4. invalid frames MUST NOT enter deduplication
+5. invalid frames MUST NOT create generation state
 
-### 3.4 Robustness Strategy
+### 4.2 Transport Outcome
 
-Robustness is achieved by converting all channel errors into erasures and relying on erasure coding for recovery.
+For OGRB data flow:
 
-This is the central protocol assumption.
+1. valid data frame -> exactly one `TransmissionUnit`
+2. invalid data frame -> erasure
 
-The visual layer may use CRC, ECC, geometry checks, or confidence thresholds to classify frames as valid or invalid. But once a frame is classified invalid, it is an erasure, not a degraded symbol.
+Control frames remain transport/control-plane concerns and are outside OGRB semantic scheduling.
 
-## 4. Information Layer (Generation + Erasure Coding)
+## 5. Information Layer
 
-This layer defines the semantic transmission objects.
+This section defines the semantic transmission objects.
 
-### 4.1 Terminology
+### 5.1 Terminology
 
-Use these terms consistently:
+The following terms MUST be used consistently:
 
 1. `source symbol`
-   A fixed-size chunk of original source data.
+   - one fixed-size source-data unit inside one generation
 2. `coded equation`
-   A linear equation over source symbols of one generation.
+   - one linear equation over source symbols of one generation
 3. `TransmissionUnit`
-   The semantic object carried by the visual layer.
+   - one semantic object carried by transport
 4. `frame`
-   A visual transport container. A frame carries one `TransmissionUnit`.
+   - one visual transport container
+5. `realization`
+   - one visual representation of one semantic unit
 
-Do not use `symbol`, `unit`, and `frame` interchangeably.
+`unit`, `symbol`, `equation`, and `frame` MUST NOT be used interchangeably.
 
-### 4.2 Generation Model
+### 5.2 Generation Model
 
 Source data is partitioned into generations.
 
@@ -175,26 +179,22 @@ Each generation has:
 
 1. `generation_id`
 2. `generation_size = K`
-3. ordered source symbols with local indices `0 .. K-1`
+3. ordered source-symbol indices `0 .. K-1`
 
 Generation completion means:
 
-1. all source symbols of that generation are known
-2. therefore the generation can be materialized as ordered source bytes
+1. all source symbols of the generation are known
+2. the generation can be materialized in source-index order
 
-Symbol Size Invariant:
+Within a generation, symbol size is fixed unless a profile-specific exception is explicitly defined.
 
-All source symbols within a generation MUST have the same fixed size.
-
-For every `TransmissionUnit` in a generation:
+For any `TransmissionUnit` in a fixed-size generation:
 
 ```text
 payload_size MUST equal symbol_size
 ```
 
-Variable payload sizes within a generation are not supported unless explicitly specified by a future extension.
-
-### 4.3 TransmissionUnit
+### 5.3 TransmissionUnit
 
 ```text
 TransmissionUnit =
@@ -202,9 +202,7 @@ TransmissionUnit =
   | CodedUnit
 ```
 
-#### 4.3.1 SystematicUnit
-
-Represents one source symbol.
+#### 5.3.1 SystematicUnit
 
 Fields:
 
@@ -214,15 +212,13 @@ Fields:
 4. `source_index`
 5. `payload`
 
-Identity:
+Semantic identity:
 
 ```text
 (generation_id, source_index)
 ```
 
-#### 4.3.2 CodedUnit
-
-Represents one coded equation over source symbols in one generation.
+#### 5.3.2 CodedUnit
 
 Fields:
 
@@ -234,116 +230,119 @@ Fields:
 6. `degree`
 7. `payload`
 
-Identity:
+Semantic identity:
 
 ```text
 (generation_id, equation_id)
 ```
 
-### 4.4 Identity Rules
+### 5.4 Identity Model
 
-The receiver must maintain two separate identity spaces:
+The protocol recognizes three identity layers.
 
-1. `received_source_ids`
-2. `received_equation_ids`
+#### 5.4.1 Semantic Unit Identity
 
-They must never be merged.
+For `SYSTEMATIC`:
 
-Specifically:
+```text
+(generation_id, source_index)
+```
 
-1. `source_index` exists only for `SYSTEMATIC`
-2. `equation_id` exists only for `CODED`
-3. a coded equation is not a source symbol
-4. a coded equation does not occupy `source_index`
+For `CODED`:
 
-The old idea of a universal `symbol_index` for all transmitted objects is invalid and must not be used.
+```text
+(generation_id, equation_id)
+```
 
-Equation Identity Rule:
+These identity spaces MUST remain separate.
 
-For `CODED` units, `equation_id` MUST uniquely identify the equation content within a given `(session_id, generation_id)`.
+#### 5.4.2 Realization Identity
 
-Two `CODED` units that correspond to the same equation, that is, the same generation, the same coefficient set, and the same coding parameters, MUST use the same `equation_id`.
+If realization diversity is used:
 
-Different `equation_id` values MUST correspond to different equations.
+```text
+realization_identity = (semantic_unit_identity, realization_index)
+```
 
-Sender implementations MUST ensure that repeated transmission of the same coded equation, including different visual realizations, preserves `equation_id`.
+Realization identity refines semantic identity. It MUST NOT replace semantic identity.
 
-Receiver implementations MUST use `(generation_id, equation_id)` as the sole identity key for coded equation deduplication.
+#### 5.4.3 Transport Frame Identity
 
-### 4.5 Coded vs Systematic Semantics
+Transport frame identity, for example `transport_frame_id`, MAY be used for:
+
+1. ordering
+2. replay logs
+3. transport statistics
+
+It MUST NOT be used for:
+
+1. semantic deduplication
+2. generation completion
+3. equation identity
+4. sender replay accounting
+
+### 5.5 Equation Identity Rule
+
+For a `CodedUnit`, `equation_id` MUST uniquely identify equation content within one generation.
+
+Therefore:
+
+1. two coded transmissions of the same equation MUST preserve the same `equation_id`
+2. two different equations within the same generation MUST use different `equation_id`
+
+If an implementation derives equation content from metadata, it MUST ensure deterministic equivalence between:
+
+1. the `equation_id`
+2. the equation definition reconstructed from `coding_seed`, coefficient scheme version, and degree
+
+Receiver deduplication MUST use `(generation_id, equation_id)` as the semantic key.
+
+### 5.6 Coded vs Systematic Semantics
 
 `SYSTEMATIC` units are direct values of variables.
 
 `CODED` units are constraints over variables.
 
-In algebraic terms:
+In algebraic form:
 
-1. systematic symbol:
+1. systematic unit:
 
 ```text
 x_i = payload
 ```
 
-2. coded equation:
+2. coded unit:
 
 ```text
 a_0*x_0 + a_1*x_1 + ... + a_(K-1)*x_(K-1) = payload
 ```
 
-For XOR-based coding over GF(2^8), coefficients are often binary selection indicators and the operation is XOR.
+The essential rule is:
 
-The critical rule is:
+**a coded equation is not a source symbol**
 
-**coded equations are not source symbols**
+### 5.7 Receiver State Model
 
-### 4.6 Equation Representation
-
-An implementation may represent a coded equation as:
-
-```text
-equation_id
-generation_id
-generation_size
-coefficient_set
-rhs_payload
-```
-
-Where:
-
-1. `coefficient_set` may be generated from `coding_seed`
-2. `rhs_payload` is the coded payload bytes
-
-The protocol requires that the receiver be able to reconstruct the same equation deterministically from the metadata.
-
-### 4.7 Decoder State Model
-
-For each generation, the receiver maintains:
+For each generation, the receiver MUST maintain explicit state with at least:
 
 1. `systematic_symbols: Dict[source_index, payload]`
 2. `coded_equations: Dict[equation_id, Equation]`
-3. `generation_size`
-4. `decode_complete`
+3. `received_source_ids`
+4. `received_equation_ids`
+5. `generation_size`
+6. `decode_complete`
 
-The receiver must not use a single set such as:
+The following model is forbidden as the primary semantic state:
 
 ```python
 known_symbols: Set[int]
 ```
 
-as the primary semantic state.
+That model collapses systematic and coded identities and is non-compliant.
 
-The correct model is:
+### 5.8 Receiver Acceptance Logic
 
-```python
-systematic_symbols: Dict[int, bytes]
-coded_equations: Dict[int, Equation]
-received_source_ids: Set[tuple[int, int]]
-received_equation_ids: Set[tuple[int, int]]
-```
-
-### 4.8 Receiver Acceptance Logic
-
-Pseudocode:
+Receiver semantic acceptance MUST be equivalent to:
 
 ```python
 def accept_unit(unit):
@@ -364,257 +363,667 @@ def accept_unit(unit):
         gen.received_equation_ids.add(eid)
         gen.coded_equations[unit.equation_id] = build_equation(unit)
         return ACCEPTED
-
-    raise ProtocolError("unknown unit type")
 ```
 
-## 5. Scheduling Layer (OGRB)
+## 6. Generation Lifecycle
 
-OGRB is the scheduling layer. It operates over `TransmissionUnit` objects. It does not define symbol semantics.
+This section defines the **sender-side scheduling lifecycle** of a generation.
 
-### 5.1 Scheduling Goals
+Receiver-side decode completion is a separate information-layer state and MUST NOT be conflated with sender scheduling state.
 
-OGRB exists to balance:
+### 6.1 Generation Creation
 
-1. forward progress into new data
-2. revisit pressure for incomplete generations
-3. bounded decoding latency
-4. tolerance to erasures without feedback
+A generation is `CREATED` when all of the following are true:
 
-### 5.2 Active Generations
+1. `generation_id` is assigned
+2. generation membership is fixed
+3. `generation_size = K` is fixed
+4. all semantic identities for the configured systematic prefix are determinable
 
-The sender maintains an active generation set.
+In the baseline profile, coded scheduling applies only to fixed-size generations.
 
-Each active generation may emit:
+A variable-size tail generation MUST either:
 
-1. systematic units
-2. coded units
+1. remain systematic-only
+2. or be governed by an explicit profile-specific tail-generation rule
 
-The scheduler chooses among active generations based on policy.
+### 6.2 Sender Lifecycle States
 
-### 5.3 New vs Old Generation Mixing
+A generation MUST be in exactly one of:
 
-The scheduler may allocate airtime differently to:
+1. `CREATED`
+2. `ACTIVE_SYSTEMATIC`
+3. `ACTIVE_CODED`
+4. `DRAINING`
+5. `COMPLETED`
+6. `EXPIRED`
+7. `EVICTED`
 
-1. new generations
-2. old incomplete generations
+`COMPLETED`, `EXPIRED`, and `EVICTED` are terminal.
 
-Typical policy knob:
+### 6.3 State Semantics
 
-```text
-old_new_ratio = airtime(old generations) / airtime(new generations)
-```
-
-This controls revisit pressure without changing information semantics.
-
-### 5.4 Revisit Cycles
-
-A revisit cycle is the time between useful opportunities for an incomplete generation to receive another `TransmissionUnit`.
-
-OGRB must be specified in terms of units, not frames.
-
-Correct statement:
-
-```text
-OGRB schedules TransmissionUnit emission opportunities for generations.
-```
-
-Incorrect statement:
-
-```text
-OGRB schedules frames directly.
-```
-
-Frames are visual carriers selected later by the transport layer.
-
-### 5.5 Overlap
-
-Generation overlap is optional and applies only to the scheduling/information boundary.
-
-If overlap is enabled:
-
-1. consecutive generations share some source symbols
-2. those symbols may be recoverable through more than one generation context
-
-Overlap improves robustness but increases schedule complexity and can reduce net forward progress.
-
-### 5.6 Redundancy Allocation
-
-The scheduler may allocate redundancy by:
-
-1. increasing systematic retransmission frequency
-2. increasing coded equation emission rate
-3. favoring old generations longer
-4. increasing overlap
-
-This is an OGRB concern. It does not redefine what a coded equation means.
-
-### 5.7 OGRB Scheduling Skeleton
-
-Pseudocode:
-
-```python
-def next_transmission(active_generations, policy):
-    gen = policy.select_generation(active_generations)
-
-    if policy.should_send_systematic(gen):
-        unit = gen.next_systematic_unit()
-    else:
-        unit = gen.next_coded_unit()
-
-    return unit
-```
-
-If overlap is enabled, generation construction decides membership. OGRB only schedules the resulting units.
-
-## 6. Visual Transport Layer
-
-This layer carries `TransmissionUnit` objects over a screen-render/capture channel.
-
-It is explicitly semantics-agnostic.
-
-### 6.1 Responsibilities
-
-The visual transport layer is responsible for:
-
-1. rendering unit metadata and payload into a visual frame
-2. preserving sync and locator structures
-3. recovering metadata and payload from captured images
-4. validating that a frame is trustworthy enough to yield exactly one `TransmissionUnit`
-
-It is not responsible for:
-
-1. generation completion
-2. equation solving
-3. OGRB scheduling
-4. deciding whether a unit is systematic or coded in a semantic sense beyond the header field
-
-Transport Semantics Boundary:
-
-The transport layer carries information-layer metadata fields, such as `generation_id`, `source_index`, `equation_id`, and coding parameters, but MUST NOT interpret, modify, or redefine their semantics.
-
-All semantic meaning of these fields is defined exclusively by the information layer.
-
-### 6.2 Existing Screen-Airdrop Design Decisions to Preserve
-
-The following are part of the current design and remain valid:
-
-1. compact control header encoding
-2. gray4 modulation as a supported visual encoding mode
-3. layered rendering, where header/control information and payload information are visually separated
-4. protocol adaptor abstraction, so multiple visual encodings can carry the same `TransmissionUnit`
-
-### 6.3 Layered Rendering
-
-Layered rendering is preserved.
-
-The meaning is:
-
-1. a frame has a control/header region or control/header layer
-2. a frame has a payload-bearing region or payload layer
-3. header recovery should fail closed
-4. payload is interpreted only after header validation succeeds
-
-This separation is transport-level. It must not redefine the meaning of systematic versus coded units.
-
-### 6.4 Compact Encoding
-
-Compact encoding is the preferred header transport when control metadata must be kept small and robust.
-
-It should carry:
-
-1. unit type
-2. generation metadata
-3. unit identity metadata
-4. coding metadata for coded units
-5. checksums / CRC
-
-### 6.5 Gray4 Modulation
-
-Gray4 is a transport modulation choice.
-
-It affects:
-
-1. visual density
-2. symbol raster layout
-3. decode sensitivity to blur/compression
-
-It does not affect:
-
-1. `TransmissionUnit` identity rules
-2. generation semantics
-3. OGRB scheduling
-
-### 6.6 Transport Contract
-
-The transport contract is:
-
-```text
-Frame decode success -> exactly one TransmissionUnit
-Frame decode failure -> erasure
-```
-
-No third outcome is allowed.
-
-## 7. Frame Format (updated header fields)
-
-Each visual frame carries exactly one `TransmissionUnit`.
-
-### 7.1 Required Header Fields
-
-The transport header must include at minimum:
-
-| Field | Type | Meaning |
-|---|---|---|
-| `session_id` | uint32 | transmission session identifier |
-| `transport_frame_id` | uint64 | monotonic visual frame sequence |
-| `unit_type` | uint8 | `SYSTEMATIC` or `CODED` |
-| `generation_id` | uint32 | generation identifier |
-| `generation_size` | uint16 | K |
-| `payload_size` | uint16 | bytes carried in this unit |
-| `source_index` | uint16 or null | valid only for `SYSTEMATIC` |
-| `equation_id` | uint32 or null | valid only for `CODED` |
-| `coding_seed` | uint32 or null | valid only for `CODED` |
-| `degree` | uint8 or null | valid only for `CODED` |
-| `header_crc` | uint16/uint32 | integrity of header |
-| `payload_crc` | uint16/uint32 | integrity of payload |
-
-### 7.2 Header Semantics
+#### CREATED
 
 Rules:
 
-1. `source_index` must be present only when `unit_type == SYSTEMATIC`
-2. `equation_id` must be present only when `unit_type == CODED`
-3. `coding_seed` and `degree` must be present only when `unit_type == CODED`
-4. `source_index` and `equation_id` must never be overloaded into a single generic field
+1. MUST NOT emit any unit
+2. MUST NOT count in the old-generation pool
+3. MAY be held in an admission queue
 
-### 7.3 Header Validation
+Entry condition:
 
-Receiver pipeline:
+1. generation membership becomes fixed
 
-1. recover header candidates
-2. validate `header_crc`
-3. reject the frame immediately if header is invalid
-4. recover payload only after header acceptance
-5. validate `payload_crc`
-6. yield `TransmissionUnit` only if both are valid
+Exit condition:
 
-### 7.4 Optional Visual Metadata
+1. admission to the active generation set
 
-The transport may include additional fields such as:
+#### ACTIVE_SYSTEMATIC
 
-1. adaptor version
-2. modulation mode
-3. layout profile
-4. realization identifier if visual diversity is added later
+This state means the generation still owes at least one first transmission of at least one configured systematic-prefix unit.
 
-These are transport concerns and must not replace the information-layer identifiers.
+Rules:
 
-## 8. Receiver Architecture
+1. MUST be in the active generation set
+2. MUST be counted in the new-generation pool
+3. MAY emit only systematic units as first transmissions
+4. MUST NOT emit a fresh coded equation before all configured systematic-prefix units have been transmitted at least once
+5. duplicate systematic retransmissions MAY be used only if a realization policy explicitly requires them; this is not the baseline default
 
-The receiver must preserve the three-layer separation internally.
+Entry condition:
 
-### 8.1 Receiver Pipeline
+1. admission of a `CREATED` generation
+
+Exit condition:
+
+1. all configured systematic-prefix units emitted at least once -> `ACTIVE_CODED`
+2. deterministic terminal transition -> `EVICTED` or `EXPIRED`
+3. feedback-capable variants MAY transition to `COMPLETED`
+
+#### ACTIVE_CODED
+
+This state means the generation has satisfied its systematic-prefix obligation and still has fresh coded budget remaining.
+
+Rules:
+
+1. MUST remain in the active generation set
+2. MUST be counted in the old-generation pool
+3. MAY emit:
+   - fresh coded equations
+   - duplicate retransmissions of previously emitted systematic units
+   - duplicate retransmissions of previously emitted coded equations
+4. fresh coded equation emission SHOULD be preferred over duplicate replay
+5. every fresh coded equation MUST use a new `equation_id`
+
+Entry condition:
+
+1. all configured systematic-prefix units have been emitted at least once
+
+Exit condition:
+
+1. fresh coded budget exhausted -> `DRAINING`
+2. terminal transition -> `COMPLETED`, `EXPIRED`, or `EVICTED`
+
+#### DRAINING
+
+This state means the generation has no fresh coded budget remaining but is still temporarily eligible for bounded replay.
+
+Rules:
+
+1. MUST remain in the active generation set only while drain budget remains
+2. MUST be counted in the old-generation pool
+3. MUST NOT emit a new coded equation
+4. MAY emit only duplicate retransmissions of previously emitted semantic units
+5. duplicate coded replay MUST preserve `equation_id`
+6. duplicate systematic replay MUST preserve `(generation_id, source_index)`
+
+Entry condition:
+
+1. fresh coded budget exhausted and drain budget is non-zero
+
+Exit condition:
+
+1. drain budget exhausted -> `EXPIRED`
+2. explicit eviction -> `EVICTED`
+3. feedback-capable completion -> `COMPLETED`
+
+#### COMPLETED
+
+`COMPLETED` is a terminal sender state.
+
+Rules:
+
+1. MUST NOT emit any additional unit
+2. MUST NOT remain in the active generation set
+3. MUST NOT count in either pool
+
+Entry condition:
+
+1. explicit positive completion signal from a feedback-capable profile
+
+Baseline rule:
+
+1. a no-feedback baseline sender MUST NOT enter `COMPLETED`
+
+#### EXPIRED
+
+`EXPIRED` is a terminal sender state indicating that the generation aged out or exhausted all configured replay opportunity without completion knowledge.
+
+Rules:
+
+1. MUST NOT emit any additional unit
+2. MUST be removed from the active generation set
+
+Entry condition:
+
+1. drain budget exhausted
+2. or generation lifetime limit reached
+
+#### EVICTED
+
+`EVICTED` is a terminal sender state indicating forced removal due to active-set pressure or explicit policy.
+
+Rules:
+
+1. MUST NOT emit any additional unit
+2. MUST be removed from the active generation set
+3. MUST be recorded in sender metrics
+
+Entry condition:
+
+1. deterministic eviction policy selects the generation
+
+### 6.4 Lifecycle Transition Requirements
+
+A compliant baseline sender MUST implement:
+
+```text
+CREATED -> ACTIVE_SYSTEMATIC -> ACTIVE_CODED -> DRAINING -> EXPIRED
+```
+
+It MAY additionally support:
+
+1. `ACTIVE_* -> EVICTED`
+2. `DRAINING -> EVICTED`
+3. feedback-gated `ACTIVE_* -> COMPLETED`
+4. feedback-gated `DRAINING -> COMPLETED`
+
+A baseline no-feedback sender MUST NOT skip directly from `ACTIVE_SYSTEMATIC` to `DRAINING` unless the configured systematic prefix is empty.
+
+## 7. Replay and Redundancy Semantics
+
+OGRB replay is not "send the same frame again".
+
+OGRB replay is the allocation of additional transmission opportunities to a generation that remains sender-side eligible.
+
+### 7.1 Three Distinct Replay Behaviors
+
+A compliant sender MUST distinguish:
+
+1. identical systematic replay
+2. identical coded replay
+3. fresh coded injection
+
+These behaviors are not semantically equivalent.
+
+### 7.2 Identical Systematic Replay
+
+An identical systematic replay retransmits the same semantic unit:
+
+```text
+(generation_id, source_index)
+```
+
+Rules:
+
+1. MUST preserve the same semantic identity
+2. MAY use a different `realization_id`
+3. provides no new semantic identity
+4. MAY provide additional visual diversity
+5. SHOULD NOT be the primary replay mechanism once a generation enters `ACTIVE_CODED`
+
+### 7.3 Identical Coded Replay
+
+An identical coded replay retransmits the same coded equation:
+
+```text
+(generation_id, equation_id)
+```
+
+Rules:
+
+1. MUST preserve the same `equation_id`
+2. MAY use a different `realization_id`
+3. provides no new semantic identity
+4. MUST be treated by the receiver as duplicate semantic information
+5. MAY still be useful as a visual-diversity retry
+
+### 7.4 Fresh Coded Injection
+
+A fresh coded injection transmits a coded equation with a new coded identity.
+
+Rules:
+
+1. MUST use a new `(generation_id, equation_id)`
+2. MUST correspond to a new deterministic equation definition
+3. is the normative replay and redundancy mechanism in `ACTIVE_CODED`
+4. counts against fresh coded budget
+5. MAY still be linearly dependent at the decoder
+
+### 7.5 Semantic Novelty vs Algebraic Innovation
+
+This specification distinguishes:
+
+1. **semantic novelty**
+   - the receiver has not previously accepted this semantic unit identity
+2. **algebraic innovation**
+   - the received coded equation increases rank or enables recovery
+
+A fresh coded equation MUST be semantically novel. It MAY or MAY NOT be algebraically innovative.
+
+A duplicate coded replay is neither semantically novel nor algebraically innovative.
+
+### 7.6 Bounded Rateless Baseline
+
+The baseline OGRB profile is **bounded rateless-style**, not pure infinite rateless.
+
+This means:
+
+1. the sender MAY generate fresh coded equations on demand from a rateless-like equation family
+2. the baseline sender MUST bound fresh coded emission per generation by `B_code_new`
+3. the baseline sender MUST bound duplicate replay by `B_drain_dup`
+4. once these budgets are exhausted, the generation MUST leave fresh replay and eventually terminate
+
+Therefore:
+
+1. the coded family is rateless-like
+2. the baseline scheduling profile is finite-budget
+
+### 7.7 Replay Termination
+
+Replay for a generation MUST terminate when the generation enters:
+
+1. `COMPLETED`
+2. `EXPIRED`
+3. `EVICTED`
+
+Fresh coded injection MUST terminate when the generation leaves `ACTIVE_CODED`.
+
+Duplicate replay MUST terminate when the generation leaves `DRAINING`.
+
+### 7.8 Replay Preference Order
+
+Absent profile-specific override, a compliant sender SHOULD prefer:
+
+1. configured systematic-prefix first transmissions
+2. fresh coded equations
+3. duplicate coded replay for visual diversity
+4. duplicate systematic replay
+
+## 8. Active Generation Set and Fairness
+
+### 8.1 Active Generation Set
+
+The sender MUST maintain an active generation set with configured integer limit:
+
+```text
+G_active_max >= 1
+```
+
+Generations in:
+
+1. `ACTIVE_SYSTEMATIC`
+2. `ACTIVE_CODED`
+3. `DRAINING`
+
+MUST count toward this limit.
+
+Generations in:
+
+1. `CREATED`
+2. `COMPLETED`
+3. `EXPIRED`
+4. `EVICTED`
+
+MUST NOT count toward this limit.
+
+### 8.2 New and Old Pools
+
+The active generation set is partitioned into:
+
+1. `new pool`
+   - generations in `ACTIVE_SYSTEMATIC`
+2. `old pool`
+   - generations in `ACTIVE_CODED`
+   - generations in `DRAINING`
+
+This pool split is the normative meaning of old/new airtime ratio in the baseline protocol.
+
+### 8.3 Pool Weighting
+
+The baseline scheduler MUST use integer pool weights:
+
+1. `W_new >= 1`
+2. `W_old >= 1`
+
+Configured old/new ratio is:
+
+```text
+old_new_ratio = W_old : W_new
+```
+
+Floating-point management inputs MAY be accepted externally, but the scheduler MUST convert them to deterministic integer weights before scheduling begins.
+
+### 8.4 Pool Selection Rule
+
+A compliant baseline sender MUST implement weighted fair pool selection.
+
+The normative baseline algorithm is weighted deficit round-robin across the two pools:
+
+1. if new pool is non-empty, add `W_new` to `deficit_new`
+2. if old pool is non-empty, add `W_old` to `deficit_old`
+3. select the eligible pool with larger deficit
+4. on ties, select the old pool
+5. after selection, subtract `1` from the selected pool deficit
+
+Equivalent algorithms MAY be used only if they preserve the same fairness and starvation guarantees.
+
+### 8.5 Generation Selection Within a Pool
+
+Within a selected pool, the baseline sender MUST use deterministic round-robin over eligible generations.
+
+Rules:
+
+1. an eligible generation MUST NOT be skipped indefinitely
+2. if a pool contains `n` eligible generations, no eligible generation MAY be bypassed for more than `n - 1` consecutive selections of that same pool
+3. pool-local order MUST remain stable unless explicit priority override is configured
+
+### 8.6 Starvation Prohibition
+
+A compliant sender MUST prevent permanent starvation.
+
+Specifically:
+
+1. every generation that remains eligible in a non-empty selected pool MUST receive transmission opportunities in finite time
+2. no scheduler MAY repeatedly select one eligible generation forever while another eligible generation remains in the same pool
+3. pool weighting MAY delay service, but MUST NOT eliminate service to a non-empty pool
+
+### 8.7 Admission Rule
+
+A `CREATED` generation MAY be admitted only if:
+
+1. the active generation set has free capacity
+2. or deterministic eviction frees capacity first
+
+Admission MUST transition directly to `ACTIVE_SYSTEMATIC`.
+
+### 8.8 Eviction Rule
+
+If capacity must be freed, the baseline eviction priority MUST be:
+
+1. oldest `DRAINING`
+2. oldest `ACTIVE_CODED` with no fresh coded budget remaining
+3. oldest `ACTIVE_CODED`
+4. `ACTIVE_SYSTEMATIC` only if no other evictable generation exists
+
+A sender MUST NOT evict an `ACTIVE_SYSTEMATIC` generation with unfulfilled systematic-prefix obligation while any `DRAINING` generation remains evictable.
+
+### 8.9 Overlap and Fairness
+
+If overlapping generations are enabled, overlap affects only:
+
+1. generation membership
+2. active-set concurrency
+
+Overlap MUST NOT change:
+
+1. semantic identity rules
+2. pool definitions
+3. duplicate semantics
+
+An older overlapping generation does not re-enter `ACTIVE_SYSTEMATIC`. It remains in its current lifecycle state until terminal transition.
+
+## 9. Integerized Generation Geometry
+
+This section defines the baseline rule for generation start, step, and overlap.
+
+### 9.1 Integer Parameters
+
+The following parameters MUST be integers at runtime:
+
+1. `generation_size = K`
+2. `generation_start`
+3. `step_size`
+4. `effective_overlap`
+
+A configuration surface MAY accept a fractional target overlap ratio, but the sender MUST integerize it before generation construction.
+
+### 9.2 Target Overlap Ratio
+
+Let:
+
+1. `alpha_target` be configured overlap ratio in `[0, 1)`
+2. `K` be generation size
+
+Define:
+
+```text
+raw_step = K * (1 - alpha_target)
+```
+
+The sender MUST compute:
+
+```text
+step_size = clamp(1, K, round_half_up(raw_step))
+```
+
+Where:
+
+1. `round_half_up(x)` means nearest integer, with `.5` ties rounded upward
+2. `clamp(1, K, value)` restricts result to `[1, K]`
+
+Then define:
+
+1. `effective_overlap = K - step_size`
+2. `effective_overlap_ratio = effective_overlap / K`
+
+### 9.3 Generation Boundaries
+
+For generation index `g >= 0`:
+
+1. `generation_start[g] = g * step_size`
+2. `generation_end_exclusive[g] = generation_start[g] + K`
+
+Generation membership is the integer interval:
+
+```text
+[generation_start[g], generation_end_exclusive[g])
+```
+
+### 9.4 No Fractional Geometry
+
+The following are forbidden in normative text and examples:
+
+1. fractional generation starts
+2. fractional step sizes
+3. fractional effective overlap values
+4. "approximately N symbols" as actual boundary rule
+
+Fractional overlap ratios MAY appear only as configuration intent, never as runtime generation boundaries.
+
+### 9.5 Integer Examples
+
+#### Robust profile example
+
+1. `K = 16`
+2. `alpha_target = 0.25`
+3. `raw_step = 12.0`
+4. `step_size = 12`
+5. `effective_overlap = 4`
+
+Generations:
+
+1. `g0 = [0, 16)`
+2. `g1 = [12, 28)`
+3. `g2 = [24, 40)`
+
+#### Balanced profile example
+
+1. `K = 24`
+2. `alpha_target = 0.125`
+3. `raw_step = 21.0`
+4. `step_size = 21`
+5. `effective_overlap = 3`
+
+Generations:
+
+1. `g0 = [0, 24)`
+2. `g1 = [21, 45)`
+3. `g2 = [42, 66)`
+
+#### Throughput profile example
+
+1. `K = 30`
+2. `alpha_target = 0.0`
+3. `raw_step = 30.0`
+4. `step_size = 30`
+5. `effective_overlap = 0`
+
+Generations:
+
+1. `g0 = [0, 30)`
+2. `g1 = [30, 60)`
+3. `g2 = [60, 90)`
+
+## 10. Realization Identity and Dedup Rules
+
+The realization layer is optional. If present, it MUST remain below semantic identity.
+
+### 10.1 Identity Levels
+
+The specification recognizes three identity levels:
+
+1. semantic unit identity
+2. realization identity
+3. transport frame identity
+
+They MUST remain distinct.
+
+### 10.2 Semantic Unit Identity
+
+For `SYSTEMATIC`:
+
+```text
+(generation_id, source_index)
+```
+
+For `CODED`:
+
+```text
+(generation_id, equation_id)
+```
+
+### 10.3 Realization Identity
+
+If realization diversity is used:
+
+```text
+realization_identity = (semantic_unit_identity, realization_index)
+```
+
+Rules:
+
+1. realization identity MUST refine semantic identity, not replace it
+2. different realizations of the same semantic unit MUST preserve the same semantic unit identity
+3. same systematic unit across realizations MUST preserve `(generation_id, source_index)`
+4. same coded equation across realizations MUST preserve `(generation_id, equation_id)`
+
+### 10.4 Transport Frame Identity
+
+Transport frame identity, such as `transport_frame_id`, MAY be carried for:
+
+1. ordering
+2. replay logs
+3. transport statistics
+
+It MUST NOT be used for:
+
+1. systematic deduplication
+2. coded deduplication
+3. equation identity
+4. generation completion logic
+
+### 10.5 Realization Count Semantics
+
+Let `D_available` be the number of realizations available for a semantic unit under a transport profile.
+
+`D_available` means only:
+
+1. how many distinct visual realizations can be generated
+
+It does **not** mean:
+
+1. every semantic unit MUST be transmitted exactly `D_available` times
+2. every realization MUST be used before moving to another semantic unit
+
+Actual realization usage is determined by realization scheduling policy.
+
+### 10.6 Receiver Deduplication Rule
+
+Receiver deduplication MUST operate on semantic identity, not realization identity.
+
+Therefore:
+
+1. same `(generation_id, source_index)` -> duplicate systematic unit
+2. same `(generation_id, equation_id)` -> duplicate coded unit
+3. different `realization_id` values do not create new semantic information
+
+A receiver MAY track per-realization statistics, but such tracking MUST NOT change semantic acceptance rules.
+
+## 11. Transport Binding Requirements
+
+Transport is not the semantic authority for OGRB. It is a carriage layer.
+
+### 11.1 Binding Rule
+
+The transport binding MUST expose enough decoded metadata to reconstruct exactly one `TransmissionUnit` on successful data-frame decode.
+
+This metadata MAY be carried through:
+
+1. explicit transport header fields
+2. payload envelope fields
+3. generation control context
+4. transport-specific control channels
+
+The semantic authority remains the information layer.
+
+### 11.2 Required Semantic Carriage
+
+The binding MUST make the following semantic fields available to the receiver normalization step:
+
+1. `session_id`
+2. `generation_id`
+3. `generation_size`
+4. `unit_type`
+5. `payload_size`
+6. `source_index` for `SYSTEMATIC`
+7. `equation_id` for `CODED`
+8. `coding_seed` and `degree` for `CODED`
+9. optional `realization_id` if realization diversity is enabled
+
+### 11.3 Binding Restrictions
+
+The binding MUST NOT:
+
+1. redefine semantic identity
+2. merge `source_index` and `equation_id`
+3. use `transport_frame_id` as semantic identity
+4. reinterpret invalid payloads as degraded semantic units
+
+## 12. Receiver Architecture
+
+The receiver MUST preserve the layer boundary internally:
 
 ```text
 capture frame
@@ -623,34 +1032,12 @@ capture frame
 -> build TransmissionUnit or discard as erasure
 -> information-layer ingest
 -> generation state update
--> generation decode attempt
+-> decode attempt
 ```
 
-### 8.2 Visual Decode Stage
+### 12.1 Per-Generation State
 
-The visual decode stage may use:
-
-1. layered header extraction
-2. compact header decoding
-3. gray4 symbol demodulation
-4. existing protocol adaptors
-
-Its output must be:
-
-1. valid `TransmissionUnit`
-2. or erasure
-
-### 8.3 Information-Layer Ingest
-
-The information-layer ingest stage must:
-
-1. route by `generation_id`
-2. split `SYSTEMATIC` and `CODED`
-3. track `received_source_ids`
-4. track `received_equation_ids`
-5. reject duplicates independently in each identity space
-
-### 8.4 State Model per Generation
+Receiver per-generation state MUST include at least:
 
 ```python
 class GenerationState:
@@ -664,168 +1051,400 @@ class GenerationState:
     last_progress_ts: float
 ```
 
-### 8.5 Processing Logic
+### 12.2 Decode Triggering
 
-```python
-def process_frame(frame):
-    unit = visual_transport_decode(frame)
-    if unit is ERASURE:
-        return
+Receiver SHOULD attempt decode after acceptance of any new semantic information:
 
-    result = information_layer_accept(unit)
-    if result in (ACCEPTED, DUPLICATE):
-        maybe_decode_generation(unit.generation_id)
-```
+1. a new `SYSTEMATIC` unit
+2. a new `CODED` unit
 
-Invalid frames do not enter deduplication, do not create partial state, and do not influence decode.
+Receiver MAY throttle decode attempts, but correctness MUST NOT depend on transport-frame timing.
 
-## 9. Decoding Algorithms
+### 12.3 Decoding Semantics
 
-### 9.0 Decode Triggering
-
-The receiver MUST define when decoding attempts are performed.
-
-Baseline rule:
-
-1. The receiver SHOULD attempt decoding after accepting any new information:
-   - a new `SYSTEMATIC` unit
-   - a new `CODED` unit
-
-2. The receiver MAY throttle decode attempts:
-   - e.g., perform decode only every N accepted units
-   - or every T milliseconds
-
-3. The receiver SHOULD skip decode if no new information has been accepted since the last attempt.
-
-Decode triggering policy does not affect correctness, but strongly affects latency and computational cost.
-
-### 9.1 Direct Completion
-
-If all systematic symbols are known:
+Direct completion:
 
 ```python
 if len(gen.systematic_symbols) == gen.generation_size:
     return materialize_in_order(gen.systematic_symbols)
 ```
 
-### 9.2 Peeling Decoding
-
-Peeling decoding applies when equations are sparse.
-
-Representation:
-
-```python
-Equation:
-    variables: set[int]
-    rhs: bytes
-```
-
-Reduction rule:
-
-1. if some variables are already known, eliminate them from the equation
-2. if an equation has exactly one unknown variable left, solve it
-3. insert that solved symbol into `systematic_symbols`
-4. repeat until no progress is possible
-
-Pseudocode:
-
-```python
-def peeling_decode(gen):
-    known = dict(gen.systematic_symbols)
-    pending = list(gen.coded_equations.values())
-
-    changed = True
-    while changed:
-        changed = False
-        for eq in pending:
-            eq = eliminate_known(eq, known)
-            if len(eq.variables) == 1:
-                idx = only_element(eq.variables)
-                if idx not in known:
-                    known[idx] = eq.rhs
-                    changed = True
-
-    if len(known) == gen.generation_size:
-        gen.systematic_symbols = known
-        gen.decode_complete = True
-```
-
-### 9.3 General Linear Solve
-
-If the code family later uses denser equations, the receiver may switch from peeling to Gaussian elimination or another solver over the appropriate finite field.
-
-The semantic model does not change:
+Otherwise:
 
 1. systematic units are known variables
 2. coded units are equations
+3. rank growth and recovery depend on equations, not on raw frame count
 
-### 9.4 Independence of Equations
+## 13. Sender Algorithm
 
-Multiple coded equations may be redundant.
+This section defines the baseline sender algorithm.
 
-Receiver must not assume:
+### 13.1 Inputs
 
-1. every coded unit adds new information
-2. every received equation is independent
+A baseline sender requires:
 
-Instead, decode progress depends on equation rank or peeling usefulness.
+1. source data partitioned into generations
+2. integer `generation_size = K`
+3. configured systematic prefix `P_sys`
+4. configured fresh coded budget `B_code_new`
+5. configured drain budget `B_drain_dup`
+6. active-generation limit `G_active_max`
+7. old/new pool weights `W_old : W_new`
+8. optional overlap configuration
+9. optional realization scheduling policy
 
-### 9.5 Duplicate and Redundant Units
+### 13.2 Generation Admission
 
-Duplicate handling:
+For each new generation:
 
-1. same `(generation_id, source_index)` -> duplicate systematic unit
-2. same `(generation_id, equation_id)` -> duplicate coded unit
+1. create generation record in `CREATED`
+2. admit it when capacity permits or after deterministic eviction
+3. transition to `ACTIVE_SYSTEMATIC`
 
-Redundant but non-duplicate coded equations are still valid. They may fail to increase rank, but they must not be collapsed into source-symbol identity space.
+### 13.3 Systematic Phase
 
-## 10. Design Principles & Invariants
+In `ACTIVE_SYSTEMATIC`:
+
+1. sender MUST emit each configured systematic-prefix unit at least once
+2. the baseline prefix rule is:
+
+```text
+source_index in [0, P_sys)
+```
+
+3. if `P_sys == K`, baseline behavior is full systematic-first
+4. if `P_sys < K`, only the configured prefix is guaranteed before coded phase
+
+### 13.4 Coded Phase
+
+After the systematic-prefix obligation is satisfied:
+
+1. transition to `ACTIVE_CODED`
+2. generate and emit fresh coded equations until `B_code_new` is exhausted
+3. each fresh equation MUST receive a new `equation_id`
+
+### 13.5 Draining Phase
+
+When `B_code_new` is exhausted:
+
+1. if `B_drain_dup > 0`, transition to `DRAINING`
+2. else transition directly to `EXPIRED`
+
+In `DRAINING`, sender MAY emit duplicate retransmissions of previously emitted semantic units only.
+
+### 13.6 Overlap
+
+If overlap is enabled:
+
+1. generation construction determines membership
+2. scheduling still operates on generation lifecycle states
+3. overlap MUST NOT alter semantic identity rules
+
+## 14. Receiver Algorithm
+
+This section defines the baseline receiver algorithm.
+
+### 14.1 Per-Frame Processing
+
+For each captured frame:
+
+1. perform visual decode
+2. if invalid, discard as erasure
+3. if valid data frame, build exactly one `TransmissionUnit`
+4. route by `generation_id`
+5. apply semantic deduplication using:
+   - `(generation_id, source_index)` for `SYSTEMATIC`
+   - `(generation_id, equation_id)` for `CODED`
+6. update generation state
+7. attempt decode according to local trigger policy
+
+### 14.2 Duplicate Handling
+
+Receiver MUST distinguish:
+
+1. duplicate systematic unit
+2. duplicate coded equation
+3. fresh but algebraically redundant coded equation
+
+Only the first two are semantic duplicates.
+
+### 14.3 Realization Handling
+
+If two different frames carry two different realizations of the same semantic unit:
+
+1. first accepted semantic unit counts
+2. later accepted realizations of that same semantic unit are duplicates
+3. receiver MAY record realization-level statistics
+4. receiver MUST NOT count multiple realizations as multiple semantic units
+
+## 15. Three Core Trade-Offs
+
+OGRB tuning is governed by three core trade-offs.
+
+### 15.1 Forward Progress
+
+Forward progress is the rate at which sender airtime reaches newer source data.
+
+Forward progress increases with:
+
+1. larger `W_new`
+2. smaller overlap
+3. smaller `B_drain_dup`
+4. smaller `D_available` usage
+
+### 15.2 Revisit Pressure
+
+Revisit pressure is the rate at which incomplete generations receive additional transmission opportunities.
+
+Revisit pressure increases with:
+
+1. larger `W_old`
+2. larger overlap
+3. larger `B_code_new`
+4. larger `B_drain_dup`
+
+### 15.3 Recovery Robustness
+
+Recovery robustness is the probability that a generation becomes decodable under erasures and realization-dependent failures.
+
+Recovery robustness increases with:
+
+1. larger `P_sys`
+2. larger `B_code_new`
+3. larger `effective_overlap`
+4. better realization diversity policy
+
+These three goals are not independent. Increasing one usually reduces at least one of the others.
+
+## 16. Operating Profiles
+
+The baseline defines three operating profiles.
+
+All profile parameters below are runtime integers or deterministic ratios.
+
+### 16.1 Robust
+
+Target:
+
+1. high erasure rate
+2. low sender FPS
+3. completion probability over throughput
+
+Recommended parameters:
+
+1. `K = 16`
+2. `alpha_target = 0.25`
+3. `step_size = 12`
+4. `effective_overlap = 4`
+5. `P_sys = 4`
+6. `B_code_new = 12`
+7. `B_drain_dup = 4`
+8. `G_active_max = 2`
+9. `W_old : W_new = 2 : 1`
+10. `D_available = 2`
+
+### 16.2 Balanced
+
+Target:
+
+1. moderate erasure rate
+2. moderate sender/capture FPS mismatch
+3. balanced throughput and recovery
+
+Recommended parameters:
+
+1. `K = 24`
+2. `alpha_target = 0.125`
+3. `step_size = 21`
+4. `effective_overlap = 3`
+5. `P_sys = 6`
+6. `B_code_new = 8`
+7. `B_drain_dup = 2`
+8. `G_active_max = 2`
+9. `W_old : W_new = 3 : 2`
+10. `D_available = 1`
+
+### 16.3 Throughput
+
+Target:
+
+1. low erasure rate
+2. high sender FPS
+3. throughput over robustness
+
+Recommended parameters:
+
+1. `K = 30`
+2. `alpha_target = 0.0`
+3. `step_size = 30`
+4. `effective_overlap = 0`
+5. `P_sys = 10`
+6. `B_code_new = 4`
+7. `B_drain_dup = 0`
+8. `G_active_max = 1`
+9. `W_old : W_new = 1 : 1`
+10. `D_available = 1`
+
+## 17. Parameter Quick Reference
+
+| Parameter | Meaning | Type | Baseline role |
+|---|---|---|---|
+| `K` | generation size | integer | source symbols per generation |
+| `alpha_target` | configured overlap ratio | rational input | converted to integer geometry |
+| `step_size` | generation step | integer | sender construction |
+| `effective_overlap` | overlap in symbols | integer | sender construction |
+| `P_sys` | systematic prefix size | integer | first-transmission obligation |
+| `B_code_new` | fresh coded budget | integer | fresh coded injection limit |
+| `B_drain_dup` | duplicate replay budget | integer | draining replay limit |
+| `G_active_max` | max active generations | integer | active-set limit |
+| `W_old` | old-pool weight | integer | fair scheduling |
+| `W_new` | new-pool weight | integer | fair scheduling |
+| `D_available` | available realization count | integer | optional visual diversity only |
+
+## 18. Performance Metrics
+
+An implementation SHOULD report metrics that respect semantic identity.
+
+### 18.1 Sender Metrics
+
+1. generations created
+2. generations admitted
+3. generations expired
+4. generations evicted
+5. fresh coded equations emitted
+6. duplicate coded replays emitted
+7. duplicate systematic replays emitted
+8. active-set occupancy over time
+
+### 18.2 Receiver Metrics
+
+1. generations completed
+2. decode latency per generation
+3. duplicate systematic rate
+4. duplicate coded rate
+5. redundant but non-duplicate coded rate
+6. rank growth over time
+7. recovered source-symbol count
+
+### 18.3 Derived Efficiency Metrics
+
+1. generation success rate
+2. median generation decode latency
+3. redundancy efficiency
+   - recovered source symbols per fresh coded equation
+4. duplicate equation rate
+   - duplicate coded receptions / total coded receptions
+5. realization efficiency, if enabled
+   - semantically accepted units / total realization transmissions
+
+## 19. Scheduler Compliance Requirements
+
+A sender is OGRB-compliant only if all of the following are true.
+
+### 19.1 Systematic Prefix Compliance
+
+For every generation, the sender MUST emit every configured systematic-prefix unit at least once before emitting the first fresh coded equation of that generation.
+
+### 19.2 Coded Identity Compliance
+
+For every generation:
+
+1. every fresh coded equation MUST use a distinct `equation_id`
+2. every duplicate retransmission of the same coded equation MUST preserve the same `equation_id`
+3. the sender MUST NOT map two different equations onto the same `(generation_id, equation_id)`
+
+### 19.3 Replay Compliance
+
+The sender MUST distinguish:
+
+1. fresh coded injection
+2. duplicate coded replay
+3. duplicate systematic replay
+
+These behaviors MUST be counted separately in sender metrics.
+
+### 19.4 Active-Set Compliance
+
+The sender MUST:
+
+1. enforce `G_active_max`
+2. admit new generations deterministically
+3. evict generations only by deterministic eviction rule
+4. remove terminal generations from the active set immediately
+
+### 19.5 Fairness Compliance
+
+The sender MUST provide finite service to every eligible active generation.
+
+A sender that can permanently starve an eligible generation is non-compliant.
+
+### 19.6 Terminal-State Compliance
+
+A generation in `COMPLETED`, `EXPIRED`, or `EVICTED` MUST NOT be scheduled again.
+
+### 19.7 Realization Compliance
+
+If realization diversity is enabled:
+
+1. realization selection MUST NOT change semantic identity
+2. duplicate realizations MUST remain duplicates at the semantic layer
+3. the sender MUST NOT require that all available realizations be emitted
+
+### 19.8 Transport Independence
+
+The scheduler MUST operate on semantic units, not transport frames.
+
+A compliant scheduler MUST NOT use `transport_frame_id` as a proxy for semantic identity or replay state.
+
+## 20. Design Invariants
 
 The following invariants are mandatory.
 
-### 10.1 Layer Separation
+### 20.1 Layer Separation
 
 1. information layer defines semantic units
-2. OGRB schedules semantic units
-3. visual transport carries semantic units
+2. scheduling layer schedules semantic units
+3. transport layer carries semantic units
 
-No layer may silently absorb the responsibilities of another.
-
-### 10.2 Identity Separation
+### 20.2 Identity Separation
 
 1. `SYSTEMATIC` identity is `(generation_id, source_index)`
 2. `CODED` identity is `(generation_id, equation_id)`
-3. these identity spaces must remain separate
+3. realization identity is subordinate to semantic identity
+4. transport frame identity is not semantic identity
 
-### 10.3 Decoding Semantics
+### 20.3 Erasure Discipline
 
-1. systematic symbols are known variables
-2. coded equations are constraints
-3. coded equations are not source symbols
+1. invalid frame -> erasure
+2. invalid frame MUST NOT partially update state
+3. invalid frame MUST NOT enter deduplication
 
-### 10.4 Erasure Discipline
+### 20.4 Sender Lifecycle Discipline
 
-1. every invalid frame is an erasure
-2. invalid frames must not partially affect system state
-3. no partial reuse of corrupted payload is allowed
+1. sender scheduling state is not receiver decode state
+2. no-feedback baseline sender MUST NOT claim completion
+3. terminal sender states MUST terminate scheduling
 
-### 10.5 Transport Agnosticism
+### 20.5 Integer Geometry Discipline
 
-1. layered rendering is preserved
-2. gray4 is preserved as a transport option
-3. compact headers are preserved
-4. none of these transport choices may redefine information semantics
+1. runtime generation boundaries MUST be integers
+2. fractional overlap is configuration intent only
+3. examples MUST use integerized geometry
 
-### 10.6 Scheduling Agnosticism
+## Appendix A. Consistency Checklist
 
-OGRB must not redefine symbol meaning. It chooses emission order and redundancy only.
-
-### 10.7 Engineering Rule
-
-If an implementation detail makes it difficult to maintain the distinction between:
-
-1. `SYSTEMATIC` vs `CODED`
-2. unit identity vs frame identity
-3. valid frame vs erasure
-
-that implementation detail is wrong and must be changed.
+1. semantic unit identity, realization identity, and transport frame identity are all defined separately
+2. no primary `known_symbols: Set[int]` model is used
+3. sender lifecycle and receiver decode lifecycle are described separately
+4. baseline no-feedback sender does not enter `COMPLETED`
+5. replay semantics distinguish:
+   - identical systematic replay
+   - identical coded replay
+   - fresh coded injection
+6. semantic novelty and algebraic innovation are described separately
+7. baseline OGRB is described as bounded rateless-style scheduling
+8. all normative geometry examples use integer `step_size` and integer `effective_overlap`
+9. realization diversity does not alter semantic identity
+10. `D_available` is not treated as a rigid transmission multiplier
+11. active-set limit, fairness, eviction, and terminal removal are all explicit
+12. transport binding is not the semantic authority for OGRB

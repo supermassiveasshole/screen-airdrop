@@ -9,6 +9,7 @@ Compares different copy strategies:
 """
 
 import time
+
 import numpy as np
 
 

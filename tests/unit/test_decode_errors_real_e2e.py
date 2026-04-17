@@ -7,14 +7,12 @@ import numpy as np
 import pytest
 
 from screen_airdrop.receiver.decode_errors import (
-    Gray4HeaderDecodeError,
     Gray4PayloadDecodeError,
     LayeredBodyDecodeError,
     LayeredBootstrapDecodeError,
 )
-from screen_airdrop.receiver.transport.gray4.decoder import decode_frame_gray4
-from screen_airdrop.receiver.transport.layered.decoder import decode_frame_layered
 from screen_airdrop.receiver.reporting.report import Gray4Report, LayeredReport
+from screen_airdrop.receiver.transport.gray4.decoder import decode_frame_gray4
 
 
 class TestRealDecoderErrorFlow:

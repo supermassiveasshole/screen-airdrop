@@ -23,9 +23,9 @@ from screen_airdrop.receiver.runtime.screen_capture import ScreenCapture
 
 
 def _build_source(config: ReceiverConfig, capture_region):
-    if config.is_replay_mode():
+    if config.is_replay_mode() or config.is_simulated_live_mode():
         if not config.frames_dir:
-            raise ValueError("--frames-dir is required when --source replay")
+            raise ValueError("--frames-dir is required when using frame-directory sources")
         return FrameReplaySource(frames_dir=config.frames_dir)
 
     return ScreenCapture(
@@ -130,8 +130,14 @@ def _dump_debug_snapshot(
 def _print_pipeline_banner(config: ReceiverConfig, forced_roi) -> None:
     if config.is_replay_mode():
         print(
-            f"replay pipeline: protocol={config.protocol} "
+            f"replay forensic pipeline: protocol={config.protocol} "
             f"frames_dir={config.frames_dir}"
+        )
+        return
+    if config.is_simulated_live_mode():
+        print(
+            f"simulated live runtime: protocol={config.protocol} workers={config.decode_workers} "
+            f"frames_dir={config.frames_dir} pacing={config.simulated_live_pacing}"
         )
         return
 
@@ -170,20 +176,31 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="screen-airdrop receiver")
     # Source configuration
     parser.add_argument(
-        "--source", choices=["screen", "replay"], default="screen", help="capture source"
+        "--source",
+        choices=["screen", "replay", "simulated_live"],
+        default="screen",
+        help="receiver source: live screen capture, forensic replay, or simulated live from frames",
     )
     parser.add_argument(
         "--window-title", default=None, help="window title to locate (screen source)"
     )
     parser.add_argument("--monitor-index", type=int, default=1, help="mss monitor index (1-based)")
     parser.add_argument(
-        "--frames-dir", default=None, help="directory with captured frames (replay source)"
+        "--frames-dir",
+        default=None,
+        help="directory with dumped frames (required for replay and simulated_live)",
     )
     parser.add_argument(
         "--replay-geometry-mode",
         choices=["stateful", "stateless"],
         default="stateful",
         help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--simulated-live-pacing",
+        choices=["none", "sender_fps"],
+        default="none",
+        help="simulated_live producer pacing mode",
     )
 
     # Protocol and grid configuration

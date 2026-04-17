@@ -93,6 +93,9 @@ def build_generation_control_payload(
     payload_chunk_count: int,
     effective_chunk_size: int,
     protocol: str,
+    coded_redundancy_count: int = 0,
+    coded_degree: int = 0,
+    coded_payload_envelope: str = "",
 ) -> bytes:
     """Build generation control payload."""
     return encode_generation_control(
@@ -104,5 +107,8 @@ def build_generation_control_payload(
             "payload_chunk_count": int(payload_chunk_count),
             "effective_chunk_size": int(effective_chunk_size),
             "protocol": protocol,
+            "coded_redundancy_count": max(0, int(coded_redundancy_count)),
+            "coded_degree": max(0, int(coded_degree)),
+            "coded_payload_envelope": str(coded_payload_envelope or ""),
         }
     )

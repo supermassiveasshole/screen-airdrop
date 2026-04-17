@@ -1,11 +1,11 @@
 """Tests for progress reporting system."""
 
 from screen_airdrop.receiver.reporting.console import ConsoleProgressReporter
-from screen_airdrop.receiver.reporting.reporter import SilentProgressReporter
 from screen_airdrop.receiver.reporting.formatters import (
     CompactStatsFormatter,
     ScreenLiveStatsFormatter,
 )
+from screen_airdrop.receiver.reporting.reporter import SilentProgressReporter
 
 
 def test_screen_live_formatter_basic():
@@ -127,11 +127,18 @@ def test_compact_formatter():
         "captured": 100,
         "decode_ok": 50,
         "decode_fail": 5,
+        "assembled": 40,
+        "decoded_new_chunks": 35,
+        "decoded_duplicate_chunks": 7,
     }
 
     line = formatter.format_progress_line(snapshot, missing_count=10)
 
-    assert line == "captured=100 decode_ok=50 decode_fail=5 missing=10"
+    assert (
+        line
+        == "captured=100 decode_ok=50 assembled=40 new_chunks=35 dup_chunks=7 "
+        "decode_fail=5 missing_chunks=10"
+    )
 
 
 def test_compact_formatter_unknown_missing():
@@ -141,11 +148,14 @@ def test_compact_formatter_unknown_missing():
         "captured": 100,
         "decode_ok": 50,
         "decode_fail": 5,
+        "assembled": 40,
+        "decoded_new_chunks": 35,
+        "decoded_duplicate_chunks": 7,
     }
 
     line = formatter.format_progress_line(snapshot, missing_count=None)
 
-    assert "missing=?" in line
+    assert "missing_chunks=?" in line
 
 
 def test_silent_reporter():
@@ -167,7 +177,14 @@ def test_console_reporter_tracks_delta():
     assert reporter.last_snapshot is None
     assert reporter.last_snapshot_time is None
 
-    snapshot1 = {"captured": 100, "decode_ok": 50, "decode_fail": 0}
+    snapshot1 = {
+        "captured": 100,
+        "decode_ok": 50,
+        "decode_fail": 0,
+        "assembled": 40,
+        "decoded_new_chunks": 35,
+        "decoded_duplicate_chunks": 7,
+    }
     reporter.report_progress(snapshot1, missing_count=10, elapsed_seconds=1.0)
 
     # Delta should be tracked
@@ -176,7 +193,14 @@ def test_console_reporter_tracks_delta():
     assert reporter.last_snapshot["captured"] == 100
 
     # Second call - with delta
-    snapshot2 = {"captured": 150, "decode_ok": 75, "decode_fail": 0}
+    snapshot2 = {
+        "captured": 150,
+        "decode_ok": 75,
+        "decode_fail": 0,
+        "assembled": 60,
+        "decoded_new_chunks": 55,
+        "decoded_duplicate_chunks": 10,
+    }
     reporter.report_progress(snapshot2, missing_count=5, elapsed_seconds=2.0)
 
     # Delta should be updated

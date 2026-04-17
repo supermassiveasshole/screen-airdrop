@@ -33,7 +33,7 @@ except ModuleNotFoundError:
         write_json_result,
     )
 
-from screen_airdrop.common.protocol_basic import FRAME_DATA, FrameHeaderBasic
+from screen_airdrop.common.transport.protocol_basic import FRAME_DATA, FrameHeaderBasic
 
 
 def parse_args() -> argparse.Namespace:

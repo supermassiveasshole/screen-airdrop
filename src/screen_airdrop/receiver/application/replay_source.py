@@ -27,31 +27,44 @@ class FrameReplaySource(object):
             return (2, int(epoch_match.group(1)), int(epoch_match.group(2)), low)
         return (3, low)
 
-    def iter_frames(self) -> Generator[np.ndarray, None, None]:
-        if not os.path.isdir(self.frames_dir):
-            raise RuntimeError("frames dir not found: {0}".format(self.frames_dir))
+    @classmethod
+    def list_frame_paths(cls, frames_dir: str) -> list[str]:
+        if not os.path.isdir(frames_dir):
+            raise RuntimeError("frames dir not found: {0}".format(frames_dir))
 
         files = []
-        for name in os.listdir(self.frames_dir):
+        for name in os.listdir(frames_dir):
             low = name.lower()
             if low.endswith(".npy") or low.endswith(".png"):
                 files.append(name)
-        files.sort(key=self._sort_key)
+        files.sort(key=cls._sort_key)
         if not files:
-            raise RuntimeError("no replay frames in: {0}".format(self.frames_dir))
+            raise RuntimeError("no replay frames in: {0}".format(frames_dir))
+        return [os.path.join(frames_dir, name) for name in files]
 
-        for name in files:
-            full = os.path.join(self.frames_dir, name)
-            if name.lower().endswith(".npy"):
-                frame = np.load(full)
-            else:
-                try:
-                    import cv2  # pylint: disable=import-outside-toplevel
-                except Exception as exc:  # pragma: no cover
-                    raise RuntimeError(
-                        "opencv-python required to read png replay frames: {0}".format(exc)
-                    )
-                frame = cv2.imread(full, cv2.IMREAD_COLOR)
-                if frame is None:
-                    raise RuntimeError("failed to read frame: {0}".format(full))
-            yield frame
+    @staticmethod
+    def load_frame(path: str) -> np.ndarray:
+        if str(path).lower().endswith(".npy"):
+            return np.load(path)
+        try:
+            import cv2  # pylint: disable=import-outside-toplevel
+        except Exception as exc:  # pragma: no cover
+            raise RuntimeError(
+                "opencv-python required to read png replay frames: {0}".format(exc)
+            )
+        frame = cv2.imread(path, cv2.IMREAD_COLOR)
+        if frame is None:
+            raise RuntimeError("failed to read frame: {0}".format(path))
+        return frame
+
+    def frame_paths(self) -> list[str]:
+        return self.list_frame_paths(self.frames_dir)
+
+    def infer_frame_size(self) -> tuple[int, int]:
+        first_frame = self.load_frame(self.frame_paths()[0])
+        height, width = first_frame.shape[:2]
+        return int(width), int(height)
+
+    def iter_frames(self) -> Generator[np.ndarray, None, None]:
+        for full in self.frame_paths():
+            yield self.load_frame(full)

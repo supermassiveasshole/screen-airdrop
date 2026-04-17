@@ -1,4 +1,8 @@
+import pytest
+
 from screen_airdrop.sender.application.controller import build_encoded_frames
+from screen_airdrop.sender.application.frame_stream import _generation_supports_coded_units
+from screen_airdrop.sender.information import build_coded_unit, build_systematic_units
 from screen_airdrop.sender.scheduling.broadcast_schedule import BroadcastSchedule
 from screen_airdrop.sender.transport.gray4.encoder import frame_capacity_bytes_gray4
 
@@ -283,3 +287,132 @@ def test_layered_sender_normalizes_session_identity_to_16bit(tmp_path):
 
     metadata = dict(first["metadata"])
     assert int(metadata["session_id"]) == 0x5678
+
+
+@pytest.mark.erasure_experiment
+def test_build_encoded_frames_can_emit_coded_units_for_fixed_size_generations(tmp_path):
+    sample = tmp_path / "sample.bin"
+    sample.write_bytes(b"x" * 5000)
+
+    items = list(
+        build_encoded_frames(
+            input_path=str(sample),
+            protocol="basic",
+            compress="none",
+            sync_frames=0,
+            chunk_size=256,
+            systematic_generation_size=3,
+            emit_coded_units=True,
+            coded_redundancy_count=2,
+            coded_degree=3,
+            epochs=1,
+        )
+    )
+
+    first = items[0]
+    coded_items = [item for item in items if item.get("is_coded")]
+    assert bool(first["metadata"]["emit_coded_units"]) is True
+    assert int(first["metadata"]["coded_redundancy_count"]) == 2
+    assert int(first["metadata"]["coded_degree"]) == 3
+    assert str(first["metadata"]["coded_scheme"]) == "gf256_seed_v2"
+    assert len(coded_items) >= 1
+    assert all(item["transmission_unit"].unit_type.value == "coded" for item in coded_items)
+    assert any(
+        plan["coded_emission_mode"] == "enabled"
+        for plan in first["metadata"]["systematic_generations"]
+    )
+    assert all("coded_degree_effective" in plan for plan in first["metadata"]["systematic_generations"])
+
+
+@pytest.mark.erasure_experiment
+def test_build_encoded_frames_clamps_effective_degree_for_short_generation(tmp_path):
+    sample = tmp_path / "sample-tail.bin"
+    sample.write_bytes(b"x" * 100)
+
+    first = next(
+        build_encoded_frames(
+            input_path=str(sample),
+            protocol="basic",
+            compress="none",
+            sync_frames=0,
+            chunk_size=256,
+            systematic_generation_size=6,
+            emit_coded_units=True,
+            coded_redundancy_count=2,
+            coded_degree=6,
+            epochs=1,
+        )
+    )
+
+    plans = list(first["metadata"]["systematic_generations"])
+    tail_plan = next(
+        plan for plan in plans if int(plan["generation_size"]) < int(first["metadata"]["systematic_generation_size"])
+    )
+
+    assert int(first["metadata"]["coded_degree"]) == 6
+    assert str(tail_plan["coded_emission_mode"]) == "enabled"
+    assert int(tail_plan["generation_size"]) == 4
+    assert int(tail_plan["coded_degree_effective"]) == 4
+    assert all(str(plan["coded_emission_mode"]) != "skipped_small_tail" for plan in plans)
+
+
+@pytest.mark.erasure_experiment
+def test_generation_supports_coded_units_requires_fixed_size_payloads():
+    fixed_units = build_systematic_units(
+        session_id=1,
+        generation_id=0,
+        generation_size=2,
+        payload_chunks=[b"aa", b"bb"],
+    )
+    variable_units = build_systematic_units(
+        session_id=1,
+        generation_id=0,
+        generation_size=2,
+        payload_chunks=[b"a", b"bb"],
+    )
+
+    assert _generation_supports_coded_units(fixed_units) is True
+    assert _generation_supports_coded_units(variable_units) is False
+
+
+@pytest.mark.erasure_experiment
+def test_build_encoded_frames_rejects_invalid_coded_degree(tmp_path):
+    sample = tmp_path / "sample.bin"
+    sample.write_bytes(b"x" * 4096)
+
+    with pytest.raises(ValueError, match="coded_degree"):
+        list(
+            build_encoded_frames(
+                input_path=str(sample),
+                protocol="basic",
+                compress="none",
+                chunk_size=256,
+                systematic_generation_size=3,
+                emit_coded_units=True,
+                coded_redundancy_count=1,
+                coded_degree=0,
+                sync_frames=0,
+                epochs=1,
+            )
+        )
+
+
+@pytest.mark.erasure_experiment
+def test_build_coded_unit_rejects_degree_larger_than_generation_size():
+    source_units = build_systematic_units(
+        session_id=1,
+        generation_id=0,
+        generation_size=2,
+        payload_chunks=[b"aa", b"bb"],
+    )
+
+    with pytest.raises(ValueError, match="generation_size"):
+        build_coded_unit(
+            session_id=1,
+            generation_id=0,
+            generation_size=2,
+            source_units=source_units,
+            equation_id=0,
+            coding_seed=0,
+            degree=3,
+        )

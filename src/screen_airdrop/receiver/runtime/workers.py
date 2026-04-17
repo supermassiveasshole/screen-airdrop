@@ -13,6 +13,7 @@ from typing import Any, List, Optional, Protocol, Sequence, Tuple, cast
 
 import numpy as np
 
+from screen_airdrop.receiver.application.replay_source import FrameReplaySource
 from screen_airdrop.receiver.decode_errors import DecodeError
 from screen_airdrop.receiver.locator.state_machine import GeometryState
 from screen_airdrop.receiver.locator.window import resolve_window_region
@@ -659,6 +660,96 @@ def grab_process_main(
         )
     except Exception as exc:  # pragma: no cover
         _debug_log("grab_process_error", error=str(exc))
+        try:
+            descriptor_queue.put({"kind": "error", "stage": "grab", "error": str(exc)})
+        except Exception:
+            pass
+    finally:
+        for shm in shms:
+            try:
+                shm.close()
+            except Exception:
+                pass
+
+
+def _copy_loaded_frame_to_slot(frame: np.ndarray, dst_view: np.ndarray) -> None:
+    height, width = dst_view.shape[:2]
+    if frame.shape[0] != height or frame.shape[1] != width:
+        raise RuntimeError(
+            "replay frame shape mismatch: expected {0}x{1}, got {2}x{3}".format(
+                width,
+                height,
+                int(frame.shape[1]),
+                int(frame.shape[0]),
+            )
+        )
+    if frame.ndim != 3 or frame.shape[2] < 3:
+        raise RuntimeError("replay frame must be HxWx3/4")
+    dst_view[:, :, :3] = frame[:, :, :3]
+    dst_view[:, :, 3] = 255
+
+
+def replay_grab_process_main(
+    *,
+    slot_assign_queue: QueueLike,
+    descriptor_queue: QueueLike,
+    stop_event: Any,
+    slot_names: Sequence[str],
+    width: int,
+    height: int,
+    frames_dir: str,
+    pacing_mode: str,
+    target_fps: float,
+) -> None:
+    _ignore_sigint_in_child()
+    shms: List[shared_memory.SharedMemory] = []
+    slot_views: List[np.ndarray] = []
+    try:
+        for name in slot_names:
+            shm = _attach_shared_memory_for_child(name)
+            shms.append(shm)
+            slot_views.append(np.ndarray((height, width, 4), dtype=np.uint8, buffer=shm.buf))
+        frame_paths = FrameReplaySource.list_frame_paths(frames_dir)
+        frame_interval = (
+            1.0 / float(target_fps)
+            if pacing_mode == "sender_fps" and float(target_fps) > 0
+            else 0.0
+        )
+        next_deadline = time.perf_counter()
+        capture_index = 0
+        for frame_path in frame_paths:
+            if stop_event.is_set():
+                break
+            item = slot_assign_queue.get()
+            if item is None:
+                break
+            slot_id, generation = cast(Tuple[int, int], item)
+            if frame_interval > 0:
+                now = time.perf_counter()
+                if now < next_deadline:
+                    time.sleep(max(0.0, next_deadline - now))
+                next_deadline = max(next_deadline + frame_interval, time.perf_counter())
+            t0 = time.perf_counter()
+            frame = FrameReplaySource.load_frame(frame_path)
+            t1 = time.perf_counter()
+            _copy_loaded_frame_to_slot(frame, slot_views[int(slot_id)])
+            t2 = time.perf_counter()
+            descriptor_queue.put({"kind": "slot_wait_ms", "value": 0.0})
+            _emit_filled_slot(
+                descriptor_queue=descriptor_queue,
+                slot_id=int(slot_id),
+                generation=int(generation),
+                capture_index=int(capture_index),
+                width=int(width),
+                height=int(height),
+                grab_ms=(t1 - t0) * 1000.0,
+                copy_ms=(t2 - t1) * 1000.0,
+            )
+            capture_index += 1
+        while not stop_event.is_set():
+            time.sleep(0.05)
+    except Exception as exc:  # pragma: no cover
+        _debug_log("replay_grab_process_error", error=str(exc))
         try:
             descriptor_queue.put({"kind": "error", "stage": "grab", "error": str(exc)})
         except Exception:

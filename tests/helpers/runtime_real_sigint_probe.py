@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import json
-import signal
 import sys
 import time
 from multiprocessing import resource_tracker
 
 from screen_airdrop.receiver.information.assembler import ChunkAssembler
-from screen_airdrop.receiver.runtime.screen_capture import ScreenCapture
 from screen_airdrop.receiver.pipeline.live import ScreenLiveRuntime
+from screen_airdrop.receiver.runtime.screen_capture import ScreenCapture
 
 
 def main() -> None:

@@ -8,9 +8,10 @@ This script helps diagnose performance issues by:
 """
 
 import time
-import psutil
+
 import mss
 import numpy as np
+import psutil
 
 
 def measure_mss_performance(iterations=100):

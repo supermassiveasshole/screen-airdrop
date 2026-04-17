@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import sys
 
-from screen_airdrop.receiver.cli import main as receiver_main
 from screen_airdrop.sender.legacy import main as sender_legacy_main
 from screen_airdrop.sender.modern import main as sender_main
+
+from screen_airdrop.receiver.cli import main as receiver_main
 
 
 def _usage() -> int:

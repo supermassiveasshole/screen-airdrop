@@ -163,8 +163,10 @@ class ScreenLiveRuntimeStats:
                 "prep_processed_frames": self.prep_processed_frames,
                 "accepted_for_decode_frames": self.accepted_for_decode_frames,
                 "decode_queue_depth": self.decode_queue_depth,
+                "decode_queue_depth_peak": self.decode_queue_depth_peak,
                 "prep_backlog_frames": self.prep_backlog_frames,
                 "prep_backlog": self.prep_backlog_frames,  # Alias for formatter compatibility
+                "prep_backlog_peak": self.prep_backlog_peak,
                 "capture_overwrite_count": self.capture_overwrite_count,
                 "capture_overwrite_before_prep": self.capture_overwrite_before_prep,
                 "dropped_raw_queue_full": 0,

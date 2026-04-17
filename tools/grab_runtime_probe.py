@@ -8,9 +8,9 @@ import multiprocessing as mp
 import queue
 import statistics
 import time
+from multiprocessing import shared_memory
 from pathlib import Path
 from typing import Any
-from multiprocessing import shared_memory
 
 from screen_airdrop.receiver.runtime.events import FilledSlotEvent
 from screen_airdrop.receiver.runtime.workers import _grab_process_main

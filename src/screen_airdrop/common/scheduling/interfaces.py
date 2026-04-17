@@ -3,9 +3,26 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Any, Optional, Sequence
 
 from screen_airdrop.common.information import TransmissionUnit
+
+
+@dataclass(frozen=True)
+class GenerationUnitCandidate:
+    """Generation-scoped candidate units for scheduling."""
+
+    generation_id: int
+    units: Sequence[TransmissionUnit]
+
+
+@dataclass(frozen=True)
+class SchedulerContext:
+    """Optional scheduler context for generation-aware policies."""
+
+    transport_epoch_id: int
+    realization_count: int = 1
+    policy: Optional[Any] = None
 
 
 @dataclass(frozen=True)
@@ -34,6 +51,7 @@ class UnitScheduler(object):
         *,
         transport_epoch_id: int,
         realization_count: int = 1,
+        generation_candidates: Optional[Sequence[GenerationUnitCandidate]] = None,
+        scheduler_context: Optional[SchedulerContext] = None,
     ) -> TransmissionSchedule:
         raise NotImplementedError
-

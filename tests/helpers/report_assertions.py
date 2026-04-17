@@ -34,3 +34,16 @@ def assert_protocol_debug_structure(report: Mapping[str, object], protocol: str)
         gray4_debug = protocol_debug.get("gray4_debug")
         assert isinstance(gray4_debug, dict)
         assert isinstance(gray4_debug.get("failure_counts"), dict)
+
+
+def assert_erasure_experiment_fields(report: Mapping[str, object]) -> None:
+    for key in (
+        "coded_units_seen",
+        "coded_units_duplicate",
+        "coded_units_invalid",
+        "coded_units_conflicting",
+        "coded_units_dependent",
+        "solver_rank_peak",
+        "recovered_source_symbols",
+    ):
+        assert key in report

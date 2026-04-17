@@ -218,9 +218,14 @@ class CompactStatsFormatter(StatsFormatter):
         captured = int(snapshot.get("captured", 0))
         decode_ok = int(snapshot.get("decode_ok", 0))
         decode_fail = int(snapshot.get("decode_fail", 0))
+        assembled = int(snapshot.get("assembled", 0))
+        decoded_new_chunks = int(snapshot.get("decoded_new_chunks", 0))
+        decoded_duplicate_chunks = int(snapshot.get("decoded_duplicate_chunks", 0))
         missing_str = "?" if missing_count is None else str(missing_count)
 
         return (
             f"captured={captured} decode_ok={decode_ok} "
-            f"decode_fail={decode_fail} missing={missing_str}"
+            f"assembled={assembled} new_chunks={decoded_new_chunks} "
+            f"dup_chunks={decoded_duplicate_chunks} decode_fail={decode_fail} "
+            f"missing_chunks={missing_str}"
         )

@@ -38,6 +38,8 @@ class DecodedFrame:
     meta: Any
     control_kind: Optional[str] = None
     transmission_unit: Optional[TransmissionUnit] = None
+    invalid_data_payload: bool = False
+    invalid_data_reason: str = ""
 
 
 TransportDecodeResult = DecodedFrame

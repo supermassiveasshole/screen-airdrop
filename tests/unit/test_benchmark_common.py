@@ -4,6 +4,8 @@ from bench.benchmark_common import (
     display_dimensions,
     load_basic_real_frames,
     load_compact_real_datasets,
+    make_decoder,
+    make_encoder,
     payload_bits_per_module,
     payload_size_for_mode,
     payload_size_for_ratio,
@@ -72,5 +74,23 @@ def test_protocol_configs_footprint_matched_expands_compact_grid():
     configs = protocol_configs("all", "footprint_matched")
     basic = next(cfg for cfg in configs if cfg.protocol == "basic")
     compact = next(cfg for cfg in configs if cfg.protocol == "compact")
+    layered = next(cfg for cfg in configs if cfg.protocol == "layered")
     assert (basic.grid_w, basic.grid_h) == (160, 96)
     assert (compact.grid_w, compact.grid_h) == (166, 102)
+    assert (layered.grid_w, layered.grid_h) == (224, 136)
+
+
+def test_protocol_configs_support_layered_directly():
+    configs = protocol_configs("layered")
+    assert len(configs) == 1
+    assert configs[0].protocol == "layered"
+    assert (configs[0].grid_w, configs[0].grid_h) == (224, 136)
+
+
+def test_benchmark_common_can_build_layered_encoder_and_decoder():
+    config = protocol_configs("layered")[0]
+    encoder = make_encoder(config, "L")
+    decoder = make_decoder(config)
+
+    assert encoder.get_layout().protocol_name == "layered"
+    assert decoder.get_layout().protocol_name == "layered"

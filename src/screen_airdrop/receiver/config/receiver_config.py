@@ -34,6 +34,7 @@ class ReceiverConfig:
     frame_queue_size: int
     result_queue_size: int
     replay_geometry_mode: str
+    simulated_live_pacing: str
 
     # Capture configuration
     capture_fps: float
@@ -83,6 +84,7 @@ class ReceiverConfig:
             frame_queue_size=args.frame_queue_size,
             result_queue_size=args.result_queue_size,
             replay_geometry_mode=args.replay_geometry_mode,
+            simulated_live_pacing=args.simulated_live_pacing,
             # Capture
             capture_fps=args.capture_fps,
             capture_dump_dir=args.capture_dump_dir,
@@ -106,8 +108,8 @@ class ReceiverConfig:
         Raises:
             ValueError: If configuration is invalid
         """
-        if self.source == "replay" and not self.frames_dir:
-            raise ValueError("replay source requires --frames-dir")
+        if self.source in {"replay", "simulated_live"} and not self.frames_dir:
+            raise ValueError(f"{self.source} source requires --frames-dir")
 
         if self.max_seconds < 0:
             raise ValueError("max-seconds must be non-negative")
@@ -126,6 +128,8 @@ class ReceiverConfig:
 
         if self.replay_geometry_mode not in {"stateful", "stateless"}:
             raise ValueError("replay-geometry-mode must be stateful or stateless")
+        if self.simulated_live_pacing not in {"none", "sender_fps"}:
+            raise ValueError("simulated-live-pacing must be none or sender_fps")
 
     def is_replay_mode(self) -> bool:
         """Check if in replay mode."""
@@ -134,6 +138,10 @@ class ReceiverConfig:
     def is_screen_mode(self) -> bool:
         """Check if in screen capture mode."""
         return self.source == "screen"
+
+    def is_simulated_live_mode(self) -> bool:
+        """Check if in simulated live mode."""
+        return self.source == "simulated_live"
 
     def has_debug(self) -> bool:
         """Check if debug mode is enabled."""

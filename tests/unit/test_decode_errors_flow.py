@@ -1,6 +1,5 @@
 """Test decode error flow: Decoder → Error → Worker → Coordinator → ProtocolCollector."""
 
-import pytest
 
 from screen_airdrop.receiver.decode_errors import (
     BasicHeaderDecodeError,

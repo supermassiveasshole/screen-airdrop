@@ -56,6 +56,9 @@ def run_sender(
     height: int = DEFAULT_HEIGHT,
     schedule: Optional[BroadcastSchedule] = None,
     dump_only: bool = False,
+    emit_coded_units: bool = False,
+    coded_redundancy_count: int = 0,
+    coded_degree: int = 2,
 ) -> int:
     if outer_padding_color.lower() not in ("black", "white"):
         raise RuntimeError("invalid outer-padding-color: {0}".format(outer_padding_color))
@@ -88,6 +91,9 @@ def run_sender(
             outer_padding_color=outer_padding_color,
             schedule=schedule,
             window_name=window_name,
+            emit_coded_units=emit_coded_units,
+            coded_redundancy_count=coded_redundancy_count,
+            coded_degree=coded_degree,
         )
         first = next(stream)
         return stream, first
@@ -207,6 +213,17 @@ def run_sender(
         dump_only=dump_only,
         control_plane_meta=control_plane_meta,
         control_summary=_control_summary(),
+        emit_coded_units=bool(metadata.get("emit_coded_units", False)),
+        coded_redundancy_count=int(metadata.get("coded_redundancy_count", 0)),
+        coded_degree=int(metadata.get("coded_degree", 0)),
+        coded_scheme=str(metadata.get("coded_scheme", "")),
+        coded_units_emitted=int(metadata.get("coded_unit_count", 0)),
+        coded_generations_skipped=sum(
+            1
+            for plan in metadata.get("systematic_generations", [])
+            if str(plan.get("coded_emission_mode", "")).startswith("skipped_")
+        ),
+        systematic_generations=list(metadata.get("systematic_generations", [])),
     )
     write_sender_report(report_json, report)
 

@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from screen_airdrop.receiver.runtime.stats import ScreenLiveRuntimeStats
 from screen_airdrop.receiver.runtime.events import FilledSlotEvent
+from screen_airdrop.receiver.runtime.stats import ScreenLiveRuntimeStats
 from screen_airdrop.receiver.runtime.workers import _async_grab_loop
 
 

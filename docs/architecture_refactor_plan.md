@@ -1,6 +1,6 @@
 # Screen-Airdrop Architecture Refactor Plan
 
-Status: Phase 1 complete; compatibility layer retired; real systematic generation model complete; boundary maintenance complete; OGRB feature work not started  
+Status: Phase 1 complete; compatibility layer retired; real systematic generation model complete; boundary maintenance complete; sparse-XOR erasure baseline complete; GF(2^8) `GF256_SEED_V2` erasure baseline complete; OGRB scheduler policy not started  
 Scope: sender, receiver, common package structure  
 Primary goals:
 
@@ -739,9 +739,10 @@ At this point the structure should already support the feature work.
 
 Current status:
 
-1. not started
-2. `CodedUnit`, equation identity, solver/rank tracking, and OGRB scheduler policy remain future work
-3. the current repository state should be treated as pre-OGRB structural groundwork
+1. erasure implementation is now in progress
+2. `CodedUnit`, equation identity, receiver-side solver/rank tracking, and test-only coded-path wiring now exist in the tree
+3. default sender/receiver behavior remains systematic-only
+4. OGRB scheduler policy is still not started
 
 ## 9. File Migration Map
 

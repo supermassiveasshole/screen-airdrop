@@ -62,6 +62,23 @@ def build_parser():
     parser.add_argument(
         "--stats-interval", type=float, default=1.0, help="stats update interval in seconds"
     )
+    parser.add_argument(
+        "--emit-coded-units",
+        action="store_true",
+        help="emit coded erasure units after systematic units",
+    )
+    parser.add_argument(
+        "--coded-redundancy-count",
+        type=int,
+        default=0,
+        help="coded units to emit per generation",
+    )
+    parser.add_argument(
+        "--coded-degree",
+        type=int,
+        default=2,
+        help="GF(2^8) coded degree for coded units",
+    )
     return parser
 
 
@@ -100,6 +117,9 @@ def main(argv=None):
         width=args.frame_width,
         height=args.frame_height,
         schedule=schedule,
+        emit_coded_units=bool(args.emit_coded_units),
+        coded_redundancy_count=int(args.coded_redundancy_count),
+        coded_degree=int(args.coded_degree),
     )
 
 

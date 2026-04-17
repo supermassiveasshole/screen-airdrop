@@ -17,7 +17,6 @@ import sys
 import time
 from typing import List, Sequence
 
-
 DEFAULT_COMMAND = [
     "uv",
     "run",

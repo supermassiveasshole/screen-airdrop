@@ -16,10 +16,16 @@ from screen_airdrop.common.control_plane import (
     decode_layout_bootstrap,
     decode_session_bootstrap,
 )
-from screen_airdrop.common.information import SystematicUnit, TransmissionUnit
+from screen_airdrop.common.information import (
+    CodedUnit,
+    CodingScheme,
+    SystematicUnit,
+    TransmissionUnit,
+)
 from screen_airdrop.common.manifest import Manifest
+from screen_airdrop.receiver.information.decoder import InformationDecoder, IngestStatus
 from screen_airdrop.receiver.information.generation_store import GenerationStore
-from screen_airdrop.receiver.information.unit_acceptor import AcceptResult, UnitAcceptor
+from screen_airdrop.receiver.information.unit_acceptor import UnitAcceptor
 
 
 class ChunkAssembler(object):
@@ -35,7 +41,12 @@ class ChunkAssembler(object):
         self._lock = threading.Lock()  # lock for thread-safe updates
         self.generation_store = GenerationStore()
         self.unit_acceptor = UnitAcceptor(self.generation_store)
+        self.information_decoder = InformationDecoder(
+            self.generation_store,
+            self.unit_acceptor,
+        )
         self._active_generation_id: int = 0
+        self.invalid_coded_payload_count: int = 0
 
     def add(self, chunk_id: int, payload: bytes) -> bool:
         """Add a chunk to the assembler.
@@ -115,13 +126,20 @@ class ChunkAssembler(object):
     def _active_generation_info_locked(self) -> Optional[Dict[str, object]]:
         return self.generations.get(self._active_generation_id)
 
-    def _resolve_unit_locked(self, unit: TransmissionUnit) -> TransmissionUnit:
-        if not isinstance(unit, SystematicUnit):
-            return unit
+    def _generation_accepts_coded_locked(self, generation_id: int) -> bool:
+        info = self.generations.get(int(generation_id)) or self._active_generation_info_locked()
+        if info is None:
+            return False
+        coded_payload_envelope = str(info.get("coded_payload_envelope", "") or "")
+        return coded_payload_envelope in {
+            CodingScheme.GF256_SEED_V1.value,
+            CodingScheme.GF256_SEED_V2.value,
+        }
 
+    def _resolve_unit_locked(self, unit: TransmissionUnit) -> TransmissionUnit:
         generation_id = int(unit.generation_id)
         generation_size = int(unit.generation_size)
-        source_index = int(unit.source_index)
+        info = None
         if generation_size <= 0:
             info = self._active_generation_info_locked()
             if info is not None:
@@ -138,14 +156,28 @@ class ChunkAssembler(object):
             if generation_size <= 0:
                 generation_size = int(info.get("payload_chunk_count", 0) or generation_size)
 
-        return SystematicUnit(
-            session_id=int(unit.session_id),
-            generation_id=generation_id,
-            generation_size=max(0, generation_size),
-            source_index=source_index,
-            payload_size=len(unit.payload),
-            payload=unit.payload,
-        )
+        if isinstance(unit, SystematicUnit):
+            return SystematicUnit(
+                session_id=int(unit.session_id),
+                generation_id=generation_id,
+                generation_size=max(0, generation_size),
+                source_index=int(unit.source_index),
+                payload_size=len(unit.payload),
+                payload=unit.payload,
+            )
+        if isinstance(unit, CodedUnit):
+            return CodedUnit(
+                session_id=int(unit.session_id),
+                generation_id=generation_id,
+                generation_size=max(0, generation_size),
+                equation_id=int(unit.equation_id),
+                coding_seed=int(unit.coding_seed),
+                degree=int(unit.degree),
+                coding_scheme=unit.coding_scheme,
+                payload_size=len(unit.payload),
+                payload=unit.payload,
+            )
+        return unit
 
     def _global_chunk_id_for_unit_locked(self, unit: SystematicUnit) -> int:
         info = self.generations.get(int(unit.generation_id))
@@ -161,16 +193,69 @@ class ChunkAssembler(object):
 
     def _add_unit_locked(self, unit: TransmissionUnit) -> bool:
         resolved_unit = self._resolve_unit_locked(unit)
-        size_hint = self._default_generation_size_locked()
-        result = self.unit_acceptor.accept(resolved_unit, generation_size_hint=size_hint)
-        if result != AcceptResult.ACCEPTED:
+        if isinstance(resolved_unit, CodedUnit) and not self._generation_accepts_coded_locked(
+            int(resolved_unit.generation_id)
+        ):
+            self._note_invalid_coded_payload_locked("coded payload not enabled for generation")
             return False
+        size_hint = self._default_generation_size_locked()
+        result = self.information_decoder.ingest(
+            resolved_unit,
+            generation_size_hint=size_hint,
+        )
         if isinstance(resolved_unit, SystematicUnit):
             global_chunk_id = self._global_chunk_id_for_unit_locked(resolved_unit)
             if global_chunk_id not in self.chunks:
                 self.chunks[global_chunk_id] = resolved_unit.payload
                 self._received_count += 1
-        return True
+            return True
+        if result.status == IngestStatus.DUPLICATE:
+            return False
+        if result.recovered_source_symbols:
+            self._materialize_recovered_symbols_locked(
+                generation_id=int(resolved_unit.generation_id),
+                symbols=result.recovered_source_symbols,
+                session_id=int(resolved_unit.session_id),
+                generation_size=int(resolved_unit.generation_size),
+            )
+            return True
+        return False
+
+    def _note_invalid_coded_payload_locked(self, reason: str) -> None:
+        self.invalid_coded_payload_count += 1
+        state = self.generation_store.get_or_create(
+            int(self._active_generation_id),
+            int(self._default_generation_size_locked()),
+        )
+        state.invalid_equation_count += 1
+        del reason
+
+    def note_invalid_coded_payload(self, reason: str) -> None:
+        with self._lock:
+            self._note_invalid_coded_payload_locked(reason)
+
+    def _materialize_recovered_symbols_locked(
+        self,
+        *,
+        generation_id: int,
+        symbols: Dict[int, bytes],
+        session_id: int,
+        generation_size: int,
+    ) -> None:
+        for source_index, payload in symbols.items():
+            unit = SystematicUnit(
+                session_id=int(session_id),
+                generation_id=int(generation_id),
+                generation_size=max(0, int(generation_size)),
+                source_index=int(source_index),
+                payload_size=len(payload),
+                payload=payload,
+            )
+            global_chunk_id = self._global_chunk_id_for_unit_locked(unit)
+            if global_chunk_id in self.chunks:
+                continue
+            self.chunks[global_chunk_id] = payload
+            self._received_count += 1
 
     def add_unit(self, unit: TransmissionUnit) -> bool:
         """Add an information-layer unit to the assembler."""

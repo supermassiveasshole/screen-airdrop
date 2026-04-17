@@ -30,6 +30,13 @@ def build_sender_report(
     dump_only: bool,
     control_plane_meta: List[Dict[str, Any]],
     control_summary: str,
+    emit_coded_units: bool = False,
+    coded_redundancy_count: int = 0,
+    coded_degree: int = 0,
+    coded_scheme: str = "",
+    coded_units_emitted: int = 0,
+    coded_generations_skipped: int = 0,
+    systematic_generations: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     sender_generation = next(
         (
@@ -73,6 +80,13 @@ def build_sender_report(
         "control_session": sender_session,
         "control_layout": sender_layout,
         "control_generation": sender_generation,
+        "emit_coded_units": bool(emit_coded_units),
+        "coded_redundancy_count": int(coded_redundancy_count),
+        "coded_degree": int(coded_degree),
+        "coded_scheme": str(coded_scheme or ""),
+        "coded_units_emitted": int(coded_units_emitted),
+        "coded_generations_skipped": int(coded_generations_skipped),
+        "systematic_generations": list(systematic_generations or []),
         **layered_profiles,
     }
 

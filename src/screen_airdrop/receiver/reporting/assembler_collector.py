@@ -62,9 +62,29 @@ class AssemblerCollector(Collector):
         if self._assembler.generation_info is not None:
             data["control_generation"] = dict(self._assembler.generation_info)
 
+        coded_schemes = [
+            str(info.get("coded_payload_envelope", "") or "")
+            for info in self._assembler.generations.values()
+            if str(info.get("coded_payload_envelope", "") or "")
+        ]
+        data["coded_scheme"] = coded_schemes[0] if coded_schemes else ""
+
         data["control_generations_seen"] = sorted(
             int(k) for k in self._assembler.generations.keys()
         )
+
+        states = list(self._assembler.generation_store.generations.values())
+        data["coded_units_seen"] = sum(int(state.coded_equation_count) for state in states)
+        data["coded_units_duplicate"] = sum(int(state.duplicate_equation_count) for state in states)
+        data["coded_units_invalid"] = int(self._assembler.invalid_coded_payload_count) + sum(
+            int(state.invalid_equation_count) for state in states
+        )
+        data["coded_units_conflicting"] = sum(int(state.conflict_count) for state in states)
+        data["coded_units_dependent"] = sum(int(state.dependent_equation_count) for state in states)
+        data["solver_rank_peak"] = max([0] + [int(state.solver_rank) for state in states])
+        data["recovered_source_symbols"] = sum(int(state.recovered_source_count) for state in states)
+        if not data["coded_scheme"] and int(data["coded_units_seen"]) > 0:
+            data["coded_scheme"] = "gf256_seed_v2"
 
         return data
 

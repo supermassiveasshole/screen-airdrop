@@ -43,6 +43,19 @@ def create_pipeline(
             config=config,
             source=cast(FrameReplaySource, source),
             assembler=assembler,
+            decode_workers=config.decode_workers,
+            guard_band=guard_band,
+            corner_size=corner_size,
+            grid_w=grid_w,
+            grid_h=grid_h,
+        )
+    if config.is_simulated_live_mode():
+        return create_registered_pipeline(
+            "simulated_live",
+            config=config,
+            source=cast(FrameReplaySource, source),
+            assembler=assembler,
+            forced_roi_local=forced_roi,
             guard_band=guard_band,
             corner_size=corner_size,
             grid_w=grid_w,

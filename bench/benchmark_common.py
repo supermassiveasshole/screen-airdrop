@@ -10,13 +10,15 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from screen_airdrop.common.protocol_interface import LayoutInfo
-from screen_airdrop.receiver.protocol_adapter_basic import BasicProtocolDecoder
-from screen_airdrop.receiver.protocol_adapter_compact import CompactProtocolDecoder
-from screen_airdrop.receiver.protocol_adapter_gray4 import Gray4ProtocolDecoder
-from screen_airdrop.sender.protocol_adapter_basic import BasicProtocolEncoder
-from screen_airdrop.sender.protocol_adapter_compact import CompactProtocolEncoder
-from screen_airdrop.sender.protocol_adapter_gray4 import Gray4ProtocolEncoder
+from screen_airdrop.common.transport.protocol_interface import LayoutInfo
+from screen_airdrop.receiver.transport.basic.adapter import BasicProtocolDecoder
+from screen_airdrop.receiver.transport.compact.adapter import CompactProtocolDecoder
+from screen_airdrop.receiver.transport.gray4.adapter import Gray4ProtocolDecoder
+from screen_airdrop.receiver.transport.layered.adapter import LayeredProtocolDecoder
+from screen_airdrop.sender.transport.basic.adapter import BasicProtocolEncoder
+from screen_airdrop.sender.transport.compact.adapter import CompactProtocolEncoder
+from screen_airdrop.sender.transport.gray4.adapter import Gray4ProtocolEncoder
+from screen_airdrop.sender.transport.layered.adapter import LayeredProtocolEncoder
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT_ROOT = ROOT / "bench" / "results"
@@ -39,6 +41,8 @@ DEFAULT_GRAY4_GRID_H = 136
 DEFAULT_GRAY4_QUIET = 4
 DEFAULT_GRAY4_FINDER = 9
 DEFAULT_GRAY4_GUARD = 2
+DEFAULT_LAYERED_GRID_W = 224
+DEFAULT_LAYERED_GRID_H = 136
 
 BASIC_FRAME_W = 2 * DEFAULT_BASIC_QUIET + 2 * DEFAULT_BASIC_FINDER + 2 * DEFAULT_BASIC_GUARD + DEFAULT_BASIC_GRID_W
 BASIC_FRAME_H = 2 * DEFAULT_BASIC_QUIET + 2 * DEFAULT_BASIC_FINDER + 2 * DEFAULT_BASIC_GUARD + DEFAULT_BASIC_GRID_H
@@ -84,16 +88,20 @@ def protocol_configs(protocol: str, layout_mode: str = "same_grid") -> list[Prot
                 ProtocolConfig("basic", grid_w=DEFAULT_BASIC_GRID_W, grid_h=DEFAULT_BASIC_GRID_H),
                 ProtocolConfig("compact", grid_w=compact_grid_w, grid_h=compact_grid_h),
                 ProtocolConfig("gray4", grid_w=DEFAULT_GRAY4_GRID_W, grid_h=DEFAULT_GRAY4_GRID_H),
+                ProtocolConfig("layered", grid_w=DEFAULT_LAYERED_GRID_W, grid_h=DEFAULT_LAYERED_GRID_H),
             ]
         return [
             ProtocolConfig("basic"),
             ProtocolConfig("compact"),
             ProtocolConfig("gray4", grid_w=DEFAULT_GRAY4_GRID_W, grid_h=DEFAULT_GRAY4_GRID_H),
+            ProtocolConfig("layered", grid_w=DEFAULT_LAYERED_GRID_W, grid_h=DEFAULT_LAYERED_GRID_H),
         ]
     if protocol == "compact" and layout_mode == "footprint_matched":
         return [ProtocolConfig("compact", grid_w=compact_grid_w, grid_h=compact_grid_h)]
     if protocol == "gray4":
         return [ProtocolConfig("gray4", grid_w=DEFAULT_GRAY4_GRID_W, grid_h=DEFAULT_GRAY4_GRID_H)]
+    if protocol == "layered":
+        return [ProtocolConfig("layered", grid_w=DEFAULT_LAYERED_GRID_W, grid_h=DEFAULT_LAYERED_GRID_H)]
     return [ProtocolConfig(protocol)]
 
 
@@ -116,6 +124,14 @@ def make_encoder(config: ProtocolConfig, ecc_level: str):
             grid_h=config.grid_h,
             ecc_level=ecc_level,
         )
+    if config.protocol == "layered":
+        return LayeredProtocolEncoder(
+            grid_w=config.grid_w,
+            grid_h=config.grid_h,
+            ecc_level=ecc_level,
+            guard_band=1,
+            corner_size=7,
+        )
     raise ValueError(f"unsupported protocol: {config.protocol}")
 
 
@@ -126,6 +142,8 @@ def make_decoder(config: ProtocolConfig):
         return CompactProtocolDecoder(grid_w=config.grid_w, grid_h=config.grid_h)
     if config.protocol == "gray4":
         return Gray4ProtocolDecoder(grid_w=config.grid_w, grid_h=config.grid_h)
+    if config.protocol == "layered":
+        return LayeredProtocolDecoder(grid_w=config.grid_w, grid_h=config.grid_h, guard_band=1, corner_size=7)
     raise ValueError(f"unsupported protocol: {config.protocol}")
 
 

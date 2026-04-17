@@ -177,6 +177,7 @@ class ScreenLiveRuntime(BasePipeline):
         prep_process: int = 0,
         initial_search_roi: Optional[Tuple[int, int, int, int]] = None,
         on_frame_callback: Optional[Any] = None,
+        pre_resolved_capture_region: Optional[Tuple[int, int, int, int]] = None,
     ) -> None:
         if int(prep_process) not in (0, 1):
             raise ValueError("prep_process must be 0 or 1")
@@ -232,12 +233,16 @@ class ScreenLiveRuntime(BasePipeline):
         )
         self.stats.prep_mode = "process" if self._prep_processes > 0 else "async"
         self.stats.prep_processes = self._prep_processes
-        monitor_region = get_monitor_region(int(self._capture.monitor_index))
-        x, y, w, h = resolve_window_region(
-            window_title=self._capture.window_title,
-            explicit_region=self._capture.region,
-            monitor_region=monitor_region,
-        )
+        if pre_resolved_capture_region is not None:
+            x, y, w, h = pre_resolved_capture_region
+            monitor_region = pre_resolved_capture_region
+        else:
+            monitor_region = get_monitor_region(int(self._capture.monitor_index))
+            x, y, w, h = resolve_window_region(
+                window_title=self._capture.window_title,
+                explicit_region=self._capture.region,
+                monitor_region=monitor_region,
+            )
         self._capture.active_region = (x, y, w, h)
         if os.getenv("SCREEN_AIRDROP_RUNTIME_DEBUG", "").lower() not in ("", "0", "false", "no"):
             import sys
@@ -397,6 +402,16 @@ class ScreenLiveRuntime(BasePipeline):
         """
         snap = self.stats.snapshot()
         snap.update(self._geometry_tracker.snapshot().as_dict())
+        snap["runtime_mode"] = "screen"
+        snap["producer_mode"] = "capture"
+        snap["decode_workers"] = self._decode_workers
+        snap["queue_depth_peak"] = int(snap.get("decode_queue_depth_peak", 0))
+        snap["result_queue_depth_peak"] = 0
+        snap["backpressure_events"] = (
+            int(snap.get("dropped_queue_full", 0))
+            + int(snap.get("dropped_slot_unavailable", 0))
+            + int(snap.get("dropped_slot_starvation", 0))
+        )
         return snap
 
     def _start_processes(self) -> None:
@@ -408,9 +423,9 @@ class ScreenLiveRuntime(BasePipeline):
                 "descriptor_queue": self._grab_event_queue,
                 "stop_event": self._proc_stop_event,
                 "slot_names": [slot.name for slot in self._slots],
-                "width": self._width,
-                "height": self._height,
-                "target_fps": float(self._capture_fps),
+                    "width": self._width,
+                    "height": self._height,
+                    "target_fps": float(self._capture_fps),
                 "window_title": self._capture.window_title,
                 "explicit_region": self._capture.region,
                 "monitor_index": int(self._capture.monitor_index),
@@ -728,3 +743,4 @@ class ScreenLiveRuntime(BasePipeline):
                     shm.unlink()
                 except Exception:
                     pass
+

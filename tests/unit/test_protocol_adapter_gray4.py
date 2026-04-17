@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from screen_airdrop.common.transport.protocol_basic import FRAME_DATA, FRAME_END, FRAME_SYNC, FrameHeaderBasic
+from screen_airdrop.common.transport.protocol_basic import (
+    FRAME_DATA,
+    FRAME_END,
+    FRAME_SYNC,
+    FrameHeaderBasic,
+)
 from screen_airdrop.sender.transport.gray4.adapter import Gray4ProtocolEncoder
 
 

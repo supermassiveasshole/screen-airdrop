@@ -1,8 +1,68 @@
 # Erasure and OGRB Skeleton Plan
 
-Status: planning only  
+Status: sparse-XOR erasure baseline complete; GF(2^8) erasure baseline complete; OGRB scheduling skeleton only  
 Scope: information-layer erasure skeleton and OGRB scheduling skeleton  
 Non-goal: this document does not authorize immediate implementation of coded transport semantics, solver logic, or wire-format changes
+
+Current implementation note:
+
+1. receiver-side sparse-XOR solver baseline now exists in `receiver/information/`
+2. coded information units and equation identity are implemented
+3. end-to-end coded-path wiring exists for tests, controlled replay, benchmark use, and sender-side formal coded controls
+4. coded emission now applies to uniform-payload short generations as well as full generations; only variable-size generations remain systematic-only
+5. default live/replay behavior is still systematic-only
+6. the sparse-XOR erasure baseline is now treated as complete
+7. the current formal coded baseline is `GF256_SEED_V2`; `GF256_SEED_V1` remains compatibility-only; OGRB policy remains future work
+
+Baseline completion summary:
+
+1. `Sparse XOR / GF(2)` is retained only as a historical baseline reference
+2. sender-side coded controls are formal and stable:
+   - `emit_coded_units`
+   - `coded_redundancy_count`
+   - `coded_degree`
+3. the current coded family is `GF256_SEED_V2`; `GF256_SEED_V1` is retained only for compatibility and benchmark comparison
+4. short generations with uniform payload size now participate directly in `GF256_SEED_V2`; variable-size generations remain systematic-only until a future explicit padding/tail profile exists
+5. multi-loss recovery, insufficient-equation behavior, and failure-mode observability are covered in tests
+6. dependent-equation observability and benchmark comparability are explicit
+7. the formal robustness matrix is degree `2/3/4` by redundancy `1/2/4`
+8. OGRB lifecycle/fairness/budget scheduling remains out of scope
+
+## Test Slices
+
+The current erasure work is intentionally split into two pytest slices:
+
+1. `erasure_experiment`
+   - coded payload envelope
+   - coded builder and scheduling helpers
+   - generation-store / solver / information-layer recovery tests
+2. `replay`
+   - replay-pipeline coverage, including slower end-to-end recovery tests
+
+Recommended commands:
+
+```bash
+# fast erasure-focused unit coverage
+uv run pytest \
+  tests/unit/test_coded_payload_envelope.py \
+  tests/unit/test_generation_store.py \
+  tests/unit/test_sender_epochs.py \
+  tests/unit/test_sender_unit_schedule.py \
+  -m "erasure_experiment and not replay"
+
+# replay-heavy erasure coverage
+uv run pytest \
+  tests/integration/test_receiver_loopback.py \
+  -m "replay and erasure_experiment"
+
+# replay coverage without the coded erasure experiments
+uv run pytest \
+  tests/integration/test_receiver_loopback.py \
+  tests/integration/test_receiver_lossy.py \
+  -m "replay and not erasure_experiment and not real_data"
+```
+
+These markers are for test organization only. They do not change default sender/receiver behavior. Coded erasure is now a formal sender capability, but still opt-in rather than default.
 
 ## 1. Purpose
 

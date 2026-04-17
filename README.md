@@ -1,83 +1,242 @@
-# screen-airdrop 需求规格说明书（仅屏幕调制传输）
+# screen-airdrop
 
-## Implementation Status (2026-03-04)
+`screen-airdrop` 通过远程桌面可见屏幕传输文件：发送端把文件编码成视觉帧并持续显示，接收端通过截屏、定位、解码和恢复把文件重建到本机。系统不依赖共享目录、驱动器映射、剪贴板文件传输或网络文件通道。
 
-Current repository now includes:
+当前分支已经不是一个“简单 QR code 播放器”。它是一个分层的视觉传输系统，包含：
 
-* Dual sender entrypoints:
-  * `screen-airdrop-sender-legacy` (Python 3.7.6 compatible)
-  * `screen-airdrop-sender` (modern Python)
-* Realtime sender pipeline: package/compress/chunk -> frame encode -> OpenCV autoplay loop.
-* Realtime receiver pipeline: MSS capture -> frame decode -> chunk assemble -> restore + SHA-256 verification.
-* Shared protocol/manifest/packing modules under `src/screen_airdrop/common`.
-* Packaging and delivery scripts:
-  * offline wheelhouse install helper
-  * CentOS 7 onefile sender build Dockerfile/script
+1. `information layer`
+   - `generation`、`SystematicUnit`、`CodedUnit`
+   - generation-local 恢复语义
+2. `scheduling layer`
+   - control burst、data ordering
+   - sender-side OGRB 的未来接入点
+3. `visual transport layer`
+   - `basic / compact / gray4 / layered`
+4. `receiver runtime`
+   - live capture、prep/dedup、geometry reuse、parallel decode、bounded backpressure
 
-Quickstart (local modern environment):
+## 当前状态
+
+当前实现已经具备：
+
+1. 完整 sender/receiver pipeline
+2. `screen / replay / simulated_live` 三种 receiver 模式
+3. generation-aware information model
+4. GF(256) 擦除恢复基线
+5. 围绕 live 吞吐的 runtime 设计
+
+当前尚未完成：
+
+1. sender-side OGRB lifecycle / fairness / overlap policy
+2. coded path 的默认产品化
+3. 不同 transport family 下的 coded live 默认路径
+
+最准确的描述是：
+
+1. 当前已经有正式的 erasure baseline
+2. 当前还没有完成最终 OGRB 调度层
+
+## 系统总图
+
+```mermaid
+flowchart LR
+    A["输入文件 / 目录"] --> B["Packing / Compression / Manifest"]
+    B --> C["Payload Chunks"]
+    C --> D["Information Layer<br/>Generation Planning<br/>SystematicUnit / CodedUnit"]
+    D --> E["Scheduling Layer<br/>Control Burst / Data Order<br/>当前为 Broadcast + Coded Augmentation"]
+    E --> F["Transport Layer<br/>basic / compact / gray4 / layered"]
+    F --> G["Render / Frame Dump"]
+    G --> H["屏幕 / 远程桌面视觉通道"]
+    H --> I["Receiver Runtime<br/>Capture / Slot / Prep / Dedup / Decode Dispatch"]
+    I --> J["Receiver Transport Decode<br/>Frame -> Control/Data Result"]
+    J --> K["Receiver Information Layer<br/>Generation Context / Dedup / Solver / Assembler"]
+    K --> L["Restore / SHA-256 Verify / 输出文件"]
+
+    M["OGRB（未完成）<br/>future sender-side policy"] -.-> E
+    N["Live Throughput Design<br/>Capture / Geometry Reuse / Parallel Decode / Backpressure"] -.-> I
+```
+
+## 快速开始
+
+安装开发依赖：
 
 ```bash
 uv sync --group dev
-uv run screen-airdrop-sender ./path/to/input --window-name “screen-airdrop”
-uv run screen-airdrop-receiver --source screen --window-title “Remote Desktop” --output-dir ./recovered
 ```
 
-Basic protocol (default):
+发送端：
 
 ```bash
-# Sender with custom parameters
-uv run screen-airdrop-sender ./path/to/input \
-  --fps 12 \
-  --chunk-size 2048 \
-  --compress gzip \
-  --ecc-level Q \
-  --module-grid 160x96 \
-  --window-name “screen-airdrop”
+uv run screen-airdrop-sender ./path/to/input --window-name "screen-airdrop"
+```
 
-# Receiver with custom parameters
+接收端：
+
+```bash
 uv run screen-airdrop-receiver \
   --source screen \
-  --window-title “Remote Desktop” \
-  --module-grid 160x96 \
-  --output-dir ./recovered \
-  --report-json ./recovered/receiver_report.json
-
-# Receiver with manual ROI
-uv run screen-airdrop-receiver \
-  --source screen \
-  --roi 100,100,800,600 \
-  --output-dir ./recovered
-
-# Receiver with interactive ROI selection
-uv run screen-airdrop-receiver \
-  --source screen \
-  --roi-interactive \
+  --window-title "Remote Desktop" \
   --output-dir ./recovered
 ```
 
-关键说明：
-
-* 当前协议为 `basic`（四角定位 + 固定网格切分 + 模块中心采样）
-* 对外命名统一为 `basic`；报告里的 `protocol_version_used = 3.1` 表示帧格式版本，不再作为协议名暴露
-* 接收端自动进行全局定位，成功后局部跟踪，连续失败自动回全局
-* 未来将支持 `fountain`（喷泉码）协议
-
-Legacy sender (Python 3.7.6 server):
+离线回放：
 
 ```bash
-screen-airdrop-sender-legacy /path/to/input --window-name “screen-airdrop”
+uv run screen-airdrop-receiver \
+  --source replay \
+  --frames-dir ./frames \
+  --output-dir ./recovered
 ```
 
-Packaging:
+模拟 live：
 
 ```bash
-./scripts/build_wheelhouse.sh
-./scripts/build_centos7_sender.sh
+uv run screen-airdrop-receiver \
+  --source simulated_live \
+  --frames-dir ./frames \
+  --output-dir ./recovered
 ```
 
-## 速率测试
+## 常用命令
 
-运行快速 replay 基准：
+运行全部测试：
+
+```bash
+uv run pytest
+```
+
+运行单个测试文件：
+
+```bash
+uv run pytest tests/unit/test_protocol.py
+```
+
+按 marker 运行：
+
+```bash
+uv run pytest -m "not real_data and not regression_data"
+```
+
+Lint：
+
+```bash
+uv run ruff check src tests
+uv run ruff format src tests
+```
+
+类型检查：
+
+```bash
+uv run pyright
+```
+
+## 架构概览
+
+### Sender
+
+发送端负责：
+
+1. 打包与压缩
+2. payload chunking
+3. generation planning
+4. systematic / coded unit 构造
+5. control plane 与 data plane 调度
+6. transport-specific frame encode
+7. render 或 frame dump
+
+当前 sender 已经支持：
+
+1. `session / layout / generation` 控制面
+2. generation-aware systematic path
+3. opt-in 的 coded emission
+4. `basic / compact / gray4 / layered` transport family
+
+当前 sender 还不支持：
+
+1. 完整 OGRB active generation lifecycle
+2. fairness / coded budget / overlap-aware revisit
+
+### Receiver
+
+接收端负责：
+
+1. frame source 管理
+2. ROI / locate / geometry tracking
+3. transport decode
+4. control-plane state update
+5. systematic / coded unit ingest
+6. generation-local solver / assembler
+7. restore 与 SHA-256 verify
+
+receiver 当前有三种模式：
+
+1. `screen`
+   - 真实屏幕采集
+2. `replay`
+   - 离线回放
+3. `simulated_live`
+   - 用离线帧模拟 live runtime
+
+### Live Throughput
+
+live 模式下的高吞吐设计重点不在单一 decoder，而在整条 runtime 流水线：
+
+1. dedicated capture loop
+2. shared-memory slot
+3. fingerprint dedup / prep
+4. geometry reuse
+5. parallel decode workers
+6. coordinator event routing
+7. bounded backpressure
+
+当前 live 设计的目标不是单纯提高 `raw fps`，而是提高单位时间内新增的有效恢复进度。
+
+## 协议与恢复
+
+当前 transport family：
+
+1. `basic`
+   - 最清楚、最稳定的 baseline
+2. `compact`
+   - geometry efficiency 优化
+3. `gray4`
+   - 更强 modulation / calibration 路线
+4. `layered`
+   - 更正式的 control/data layering 与帧内保护结构
+
+当前信息层恢复能力：
+
+1. generation-local systematic / coded distinction
+2. `GF256_SEED_V2` 作为正式 coded baseline
+3. receiver 侧 GF(256) solver
+4. replay-heavy 的擦除恢复验证
+
+当前边界：
+
+1. coded path 仍依赖 generation context
+2. strongest proof 主要集中在 `basic` 回放链路
+3. sender-side OGRB 仍未落地
+
+## 代码结构
+
+核心目录：
+
+1. `src/screen_airdrop/common`
+   - control plane、information objects、transport shared logic
+2. `src/screen_airdrop/sender`
+   - sender application / information / scheduling / transport / render
+3. `src/screen_airdrop/receiver`
+   - receiver pipeline / runtime / transport / information / reporting / roi / locator
+4. `tests/unit`
+   - 纯逻辑测试
+5. `tests/integration`
+   - loopback、loss、replay、erasure 恢复测试
+6. `tests/e2e`
+   - 真实数据集测试
+
+## Benchmark
+
+运行 replay / decode / end-to-end benchmark：
 
 ```bash
 uv run python bench/compare_protocols.py --protocol all --ecc Q --payload-mode fixed --payload-size 500
@@ -86,425 +245,34 @@ uv run python bench/compare_end_to_end.py --mode replay --protocol all --ecc Q -
 uv run python bench/summarize.py
 ```
 
-单窗口 decode-success 粗筛：
+输出文件位于：
 
-```bash
-uv run python bench/scan_frame_decode_success.py --mode screen
-```
+1. `bench/results/synthetic_cpu_benchmark_*.json`
+2. `bench/results/real_frame_decode_benchmark_*.json`
+3. `bench/results/end_to_end_*_benchmark_*.json`
+4. `bench/results/summary.md`
 
-输出文件：
+## 文档入口
 
-* `bench/results/synthetic_cpu_benchmark_*.json`
-* `bench/results/real_frame_decode_benchmark_*.json`
-* `bench/results/end_to_end_*_benchmark_*.json`
-* `bench/results/frame_decode_success_scan_*.json`
-* `bench/results/summary.md`
+如果要理解当前分支的设计与边界，建议阅读：
 
-## 指标解释
+1. [交付说明与当前实现状态](./docs/delivery_handoff_current_status.md)
+2. [OGRB Protocol Specification](./docs/ogrb_specification.md)
+3. [Erasure and OGRB Skeleton Plan](./docs/erasure_ogrb_skeleton_plan.md)
+4. [Architecture Refactor Plan](./docs/architecture_refactor_plan.md)
+5. [Gray4 Layered Full ECC Design](./docs/gray4_layered_full_ecc_design.md)
+6. [Protocol Efficiency Report](./docs/protocol_efficiency_report.md)
 
-* `raw_frame_rate_fps`: 接收端处理的总帧率（含坏帧）
-* `valid_frame_rate_fps`: CRC/解码通过的有效帧率
-* `goodput_kibps`: 有效 payload 吞吐（单位 KiB/s，核心速率指标）
-* `end_to_end_kibps`: 从开始到恢复完成的端到端吞吐（单位 KiB/s）
-* `bad_frame_rate`: 坏帧占比
-* `recovery_latency_s`: 从接收到首个数据帧到恢复完成耗时
-* `decode_attempts_per_frame`: 平均每帧解码尝试次数（越低越快）
-* `homography_stability`: 连续帧检测框抖动均值（越低越稳）
+## 当前推荐表述
 
-为什么优先看 `goodput_kibps`：
+如果需要向外部同事描述当前分支，推荐这样说：
 
-* `raw fps` 无法反映有效负载，可能“帧率高但有效数据少”
-* `goodput` 更接近真实传输效率
+1. 这是一个已经具备 generation-aware sender/receiver pipeline 的视觉传输系统
+2. 当前已有 GF(256) 擦除恢复基线和 live runtime 高吞吐设计
+3. 当前还没有完成 sender-side OGRB lifecycle / fairness policy
 
-常见瓶颈排查：
+不推荐这样说：
 
-1. `bad_frame_rate` 高：优先调大 `block-size`（如 8）与阈值策略。
-2. `valid_frame_rate_fps` 低：检查截屏区域/窗口定位是否稳定。
-3. `end_to_end_kibps` 低：检查 `chunk-size` 与 `fps` 是否匹配当前分辨率容量。
-
-## 0. 摘要
-
-screen-airdrop 是一个在受限环境（离线/隔离/无网络文件通道）下，通过远程桌面可见屏幕将服务器文件导出到本机的工具。
-
-本项目只实现一种传输方式：
-
-* 发送端将文件编码为可视帧并在远程桌面持续播放。
-* 接收端在本机窗口截屏、解码、重组并恢复文件。
-
-不依赖共享目录、驱动器映射、剪贴板文件传输等回传通道。
-
----
-
-## 1. 目标与非目标
-
-### 1.1 目标
-
-* 从服务器导出文件或目录到本机。
-* 发送端尽量仅依赖 Python 标准库（Python 3.7.6）。
-* 在远程桌面画面压缩、卡顿、重复帧下仍可最终收齐文件。
-* 提供可观测的实时指标：吞吐、帧成功率、CRC 失败率、预计剩余时间。
-* 在 1080p 典型环境下基线吞吐达到 **>=200 KB/s**，条件良好目标 **>=1 MB/s**。
-
-### 1.2 非目标
-
-* 不提供端到端加密、身份认证、权限系统。
-* 不对抗恶意篡改（仅做误码检测与恢复）。
-* 不支持“无图形输出/无远程桌面显示”的服务器。
-* 不保证在任意分辨率和任意刷新率下都达到目标吞吐。
-
----
-
-## 2. 术语与约定
-
-* Session：一次文件传输任务的唯一会话。
-* Frame：屏幕播放的一帧编码画面。
-* Chunk：payload 切片后的最小数据单元。
-* Epoch：发送端循环播放全量 Frame 的轮次。
-* Manifest：会话元信息（文件结构、哈希、参数）。
-* ROI（Region of Interest）：接收端截屏并解码的窗口区域。
-
-单位与编码：
-
-* 默认字节序：little-endian。
-* 字符串编码：UTF-8。
-* 哈希算法：SHA-256。
-* 帧内校验：CRC32。
-
----
-
-## 3. 系统架构
-
-screen-airdrop = **Sender + Receiver + Protocol**
-
-* Sender（服务器）：打包、压缩、分片、帧编码、循环播放。
-* Receiver（本机）：窗口定位、截屏采样、帧解码、去重补齐、重组校验。
-* Protocol（共享逻辑）：帧头格式、manifest 格式、校验规则、状态码。
-
-数据流：
-
-1. Sender 将输入目录打包并压缩为 payload。
-2. payload 切片为 chunk，映射为 Frame 序列。
-3. Frame 序列循环播放到远程桌面窗口。
-4. Receiver 持续截屏并解码 Frame。
-5. 收齐全部 chunk 后重组、解压、恢复目录并做最终 SHA-256 校验。
-
----
-
-## 4. 端到端流程
-
-### 4.1 发送流程
-
-1. 解析输入路径（文件或目录）。
-2. 生成 tar（保留层级与权限元数据）。
-3. 压缩（默认 gzip，可选 none）。
-4. 生成 manifest。
-5. 按 `chunk_size` 切片并构造 Frame。
-6. 先播放同步帧（Sync），再循环播放数据帧（Data）。
-
-### 4.2 接收流程
-
-1. 选择目标窗口并锁定 ROI。
-2. 读取 Sync 帧，完成网格定位与阈值校准。
-3. 进入 Data 捕获循环，按 `session_id + frame_id` 去重。
-4. CRC32 验证通过则写入 chunk 缓存。
-5. 检测缺失 chunk，等待后续 Epoch 自动补齐。
-6. 全量收齐后重组 payload 并解压恢复。
-7. 对照 manifest 执行 SHA-256 终验。
-
----
-
-## 5. Sender 规格（服务器）
-
-### 5.1 环境与依赖
-
-* Python 3.7.6。
-* 标准库必备：`os` `tarfile` `zlib` `hashlib` `struct` `json` `time`。
-* 不要求 OpenCV、NumPy、GPU、系统级 GUI 库。
-
-### 5.2 打包与压缩
-
-* 输入支持单文件和目录。
-* 打包格式固定：`tar`。
-* 压缩算法：`gzip`（默认）或 `none`。
-* 输出逻辑对象：
-  * `payload.bin`（内存流或临时文件）
-  * `manifest.json`
-
-### 5.3 分片
-
-* 默认 `chunk_size = 16384`（16 KB），允许 8 KB~64 KB。
-* `total_chunks = ceil(payload_size / chunk_size)`。
-* 末尾 chunk 允许不足 `chunk_size`。
-
-### 5.4 播放要求
-
-* 播放模式：窗口内全屏绘制（边框可留安全区）。
-* 目标帧率：8~20 FPS，可配置。
-* 必须循环播放，直到用户手动结束或达到 `max_epochs`。
-
----
-
-## 6. Receiver 规格（本机）
-
-### 6.1 环境与依赖
-
-* Python 3.10+。
-* 推荐依赖：`mss` `numpy` `opencv-python`（可替换）。
-* 可选硬件加速：GPU（非必需）。
-
-### 6.2 功能责任
-
-* ROI 选取与透视/缩放修正。
-* 二值化与网格采样。
-* 帧头解析、payload 还原、CRC32 校验。
-* chunk 去重与缺块追踪。
-* 收齐后重组、解压与落盘。
-* 输出统计：FPS、解码成功率、当前吞吐。
-
-### 6.3 容错要求
-
-* 对重复帧必须幂等处理。
-* 对坏帧（CRC 失败）必须丢弃并计数。
-* 对短时卡顿必须自动恢复，不中断会话。
-
----
-
-## 7. 屏幕协议规格（核心）
-
-### 7.1 画面布局
-
-每帧由三部分组成：
-
-1. 定位区（四角定位标记 + 边缘参考条）
-2. Header 区（高鲁棒编码，低密度）
-3. Payload 区（高密度网格编码）
-
-### 7.2 Header 字段（必须）
-
-固定长度二进制结构（建议 48 字节）：
-
-* `magic` `uint32`：固定值 `0x53415244`（"SARD"）
-* `version` `uint8`：协议版本，当前 `1`
-* `frame_type` `uint8`：`0=sync` `1=data` `2=end`
-* `flags` `uint16`：保留位
-* `session_id` `uint64`
-* `epoch_id` `uint32`
-* `frame_id` `uint32`
-* `total_frames` `uint32`
-* `chunk_id` `uint32`（仅 data 帧有效）
-* `payload_len` `uint16`
-* `header_crc32` `uint32`
-* `payload_crc32` `uint32`
-
-### 7.3 Payload 编码
-
-* 默认模式：1 bit/block（二值黑白）。
-* `block_size` 可配置：`4|6|8`（像素）。
-* 采样规则：取每个 block 中心 `3x3` 子区域均值判定。
-* 比特序：行优先（row-major）。
-
-### 7.4 Sync 帧
-
-* 每个 Session 启动时连续发送 `sync_frames >= 30`。
-* 包含棋盘格、灰阶条、角标 ID。
-* Receiver 用于：
-  * ROI 锁定
-  * 亮度阈值校准
-  * 缩放与轻微透视矫正
-
-### 7.5 End 帧
-
-* 全量 Data 至少完成 1 个 Epoch 后发送 End 帧。
-* End 帧仅作为“发送完成提示”，不代表接收已收齐。
-
----
-
-## 8. Manifest 规格
-
-### 8.1 顶层字段
-
-* `protocol_version`
-* `session_id`
-* `created_at`
-* `input_root_name`
-* `pack`（`tar`）
-* `compress`（`gzip|none`）
-* `chunk_size`
-* `total_chunks`
-* `payload_size`
-* `payload_sha256`
-* `entries`（文件条目列表）
-
-### 8.2 entries 字段
-
-每项包含：
-
-* `path`
-* `type`（`file|dir|symlink`）
-* `size`
-* `mode`
-* `mtime`
-* `sha256`（文件类型可选，建议启用）
-
----
-
-## 9. 状态机与重传策略
-
-### 9.1 Sender 状态机
-
-`INIT -> PACK -> ENCODE -> SYNC -> DATA_LOOP -> END_LOOP -> DONE`
-
-* `DATA_LOOP`：按 `frame_id=0..N-1` 连续输出。
-* 一个 Epoch 完成后 `epoch_id += 1` 并重头播放。
-
-### 9.2 Receiver 状态机
-
-`INIT -> CALIBRATE -> CAPTURE -> ASSEMBLE -> VERIFY -> RESTORE -> DONE`
-
-* `CAPTURE` 阶段维护 `missing_chunks` 集合。
-* 当 `missing_chunks` 为空时进入 `ASSEMBLE`。
-
-### 9.3 重传机制
-
-* 无反向 ACK 通道。
-* 通过 Epoch 广播式自然重传。
-* 高丢帧场景通过更大 block size 降低误码率。
-
----
-
-## 10. 参数与默认值
-
-### 10.1 发送端
-
-* `--fps` 默认 `12`
-* `--chunk-size` 默认 `2048`
-* `--compress` 默认 `gzip`
-* `--ecc-level` 默认 `Q`（可选：L/M/Q/H）
-* `--module-grid` 默认 `160x96`
-* `--window-name` 默认 `screen-airdrop`
-* `--max-epochs` 默认 `0`（0 表示无限循环）
-* `--protocol` 默认 `basic`（未来支持 `fountain`）
-
-### 10.2 接收端
-
-* `--source` 默认 `screen`（可选：replay）
-* `--window-title` 必填（screen 模式）
-* `--module-grid` 默认 `160x96`
-* `--roi` 可选手动 ROI（格式：x,y,w,h）
-* `--roi-interactive` 可选交互式 ROI 选择
-* `--max-idle-seconds` 默认 `30`
-* `--output-dir` 默认 `./recovered`
-* `--protocol` 默认 `basic`
-
----
-
-## 11. CLI 规格
-
-### 11.1 sender
-
-```bash
-uv run screen-airdrop-sender /path/to/input \
-  --fps 12 \
-  --chunk-size 2048 \
-  --compress gzip \
-  --ecc-level Q \
-  --module-grid 160x96
-```
-
-### 11.2 receiver
-
-```bash
-uv run screen-airdrop-receiver \
-  --source screen \
-  --window-title "Remote Desktop" \
-  --module-grid 160x96 \
-  --output-dir ./recovered
-```
-
-### 11.3 运行输出（必须）
-
-* `session_id`
-* `epoch/frame`
-* `decoded_chunks/total_chunks`
-* `fps`
-* `throughput_kibps`
-* `crc_fail_rate`
-* `eta`
-
----
-
-## 12. 错误码与失败语义
-
-* `E1001`：输入路径不存在
-* `E1002`：打包失败
-* `E1003`：压缩失败
-* `E2001`：无法定位 ROI
-* `E2002`：同步校准失败
-* `E2003`：帧头 CRC 错误
-* `E2004`：payload CRC 错误
-* `E3001`：重组后 SHA-256 不一致
-* `E3002`：解压/恢复失败
-
-失败要求：
-
-* 输出错误码与简明原因。
-* 保留中间产物（可配置清理）。
-* 支持同一 `session_id` 继续捕获补齐。
-
----
-
-## 13. 性能指标与基准
-
-### 13.1 验收性能
-
-* 1080p，`block=8`：>=200 KB/s。
-* 1080p，`block=4~6`，网络稳定：目标 >=1 MB/s。
-* 1 GB 文件传输最终 SHA-256 一致。
-
-### 13.2 基准输出
-
-`bench/` 需产出：
-
-* 不同 block size 的吞吐曲线。
-* 不同 FPS 的 CRC 失败率。
-* 总用时、有效负载比（payload/frame_bits）。
-
----
-
-## 14. 交付物
-
-必须交付：
-
-* `sender.py`：打包、压缩、分片、帧编码、播放。
-* `receiver.py`：截屏、解码、去重、重组、恢复。
-* `protocol.py`：Header/Manifest/CRC/状态码。
-* `README.md`：本规格与操作步骤。
-* `bench/`：基准脚本与结果样例。
-
----
-
-## 15. 验收标准
-
-1. 功能正确性：
-* 文件与目录均可传输并恢复。
-* 恢复结果与源数据 SHA-256 一致。
-
-2. 鲁棒性：
-* 出现重复帧、间歇卡顿时仍可最终收齐。
-* CRC 错误帧不会污染最终结果。
-
-3. 性能：
-* 在 1080p 条件下达到基线吞吐（>=200 KB/s）。
-
-4. 可运维性：
-* 日志可定位失败阶段与错误码。
-* 参数可调，默认值可直接完成常规传输。
-
----
-
-## 16. 后续可选增强（不影响本期验收）
-
-* 灰度 2-bit 编码（4 灰度）提升单位帧吞吐。
-* FEC（Reed-Solomon）减少高误码场景等待时间。
-* 多窗口/多显示器自动识别。
-* SIMD/GPU 解码加速。
+1. “现在已经是最终 OGRB”
+2. “现在的 coded path 就是最终 rateless policy”
+3. “layered 已经等于最终完整协议”

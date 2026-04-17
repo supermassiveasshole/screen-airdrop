@@ -1,6 +1,5 @@
 """Tests for grab statistics separation (raw_grab vs captured)."""
 
-import pytest
 
 from screen_airdrop.receiver.runtime.events import FilledSlotEvent, FrameSlotDescriptor
 from screen_airdrop.receiver.runtime.stats import ScreenLiveRuntimeStats

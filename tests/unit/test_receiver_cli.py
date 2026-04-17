@@ -3,8 +3,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any, cast
 
-from screen_airdrop.receiver.runtime.screen_capture import ScreenCapture
 from screen_airdrop.receiver.cli import _build_source, _select_capture_region, build_parser
+from screen_airdrop.receiver.runtime.screen_capture import ScreenCapture
 
 
 def test_build_parser_defaults_decode_workers_to_one() -> None:
@@ -12,9 +12,18 @@ def test_build_parser_defaults_decode_workers_to_one() -> None:
     assert int(args.decode_workers) == 1
 
 
+def test_build_parser_accepts_replay_and_simulated_live_sources() -> None:
+    replay_args = build_parser().parse_args(["--source", "replay"])
+    simulated_args = build_parser().parse_args(["--source", "simulated_live"])
+
+    assert replay_args.source == "replay"
+    assert simulated_args.source == "simulated_live"
+
+
 def test_build_source_preserves_capture_crop_when_manual() -> None:
     config = SimpleNamespace(
         is_replay_mode=lambda: False,
+        is_simulated_live_mode=lambda: False,
         window_title="demo",
         monitor_index=1,
     )
@@ -28,6 +37,7 @@ def test_build_source_preserves_capture_crop_when_manual() -> None:
 def test_build_source_uses_full_capture_when_region_missing() -> None:
     config = SimpleNamespace(
         is_replay_mode=lambda: False,
+        is_simulated_live_mode=lambda: False,
         window_title="demo",
         monitor_index=1,
     )

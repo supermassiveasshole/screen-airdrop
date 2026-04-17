@@ -24,6 +24,13 @@ def test_create_progress_reporter_replay():
     assert isinstance(reporter.formatter, CompactStatsFormatter)
 
 
+def test_create_progress_reporter_simulated_live():
+    reporter = create_progress_reporter("simulated_live")
+
+    assert isinstance(reporter, ConsoleProgressReporter)
+    assert isinstance(reporter.formatter, CompactStatsFormatter)
+
+
 def test_create_progress_reporter_other():
     """Test creating progress reporter for other source types uses compact formatter."""
     reporter = create_progress_reporter("other")

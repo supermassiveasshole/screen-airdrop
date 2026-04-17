@@ -23,7 +23,6 @@ from screen_airdrop.common.control_plane import (
 from screen_airdrop.common.transport.protocol_basic import FRAME_DATA, FrameHeaderBasic
 from screen_airdrop.common.transport.protocol_interface import DecodedFrame
 from screen_airdrop.receiver.information.assembler import ChunkAssembler
-from screen_airdrop.receiver.transport.basic.decoder import DecodeMetaBasic
 from screen_airdrop.receiver.pipeline import (
     AssemblerThread,
     DecodeResult,
@@ -34,6 +33,7 @@ from screen_airdrop.receiver.pipeline import (
     _fingerprint_from_bgra,
     _release_shared_frame,
 )
+from screen_airdrop.receiver.transport.basic.decoder import DecodeMetaBasic
 
 # ---------------------------------------------------------------------------
 # Helpers
